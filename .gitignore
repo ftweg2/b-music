@@ -1,0 +1,90 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+
+.env
+*.cookies.txt
+cookies.txt
+storage_state.json
+secrets/
+
+*.sqlite3
+*.db
+*.log
+
+kernel/storage/*
+!kernel/storage/.gitkeep
+
+bili-music-app/data/*
+!bili-music-app/data/.gitkeep
+bili-music-app/.next/
+bili-music-app/node_modules/
+bili-music-app/*.log
+bili-music-app/*.mp3
+bili-music-app/*.m4a
+bili-music-app/*.m4s
+bili-music-app/*.wav
+bili-music-app/*.mp4
+# Node / Next.js
+node_modules/
+**/node_modules/
+.next/
+**/.next/
+out/
+dist/
+build/
+.npm-cache/
+**/.npm-cache/
+*.tsbuildinfo
+
+# Python
+.venv/
+venv/
+**/.venv/
+**/venv/
+__pycache__/
+**/__pycache__/
+.pytest_cache/
+**/.pytest_cache/
+*.pyc
+
+# Env files
+.env
+.env.*
+!.env.example
+
+# App database/runtime data
+bili-music-app/data/*
+!bili-music-app/data/.gitkeep
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# Kernel sensitive storage
+kernel/storage/*
+!kernel/storage/.gitkeep
+
+# Media / artifacts
+*.m4a
+*.m4s
+*.mp3
+*.mp4
+*.webm
+*.flac
+*.wav
+artifacts/
+artifact/
+
+# Temporary test files
+wstest*.txt
+wstest*.err
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

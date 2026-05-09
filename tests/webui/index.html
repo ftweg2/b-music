@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>bili-ctf-audio-kernel 验收控制台</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="config.example.js?v=20260507-qr2"></script>
+    <script src="app.js?v=20260507-qr2" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>bili-ctf-audio-kernel</h1>
+        <p>手动 HTTP API 验收控制台，只通过 kernel API 工作。</p>
+      </div>
+      <label class="base-url">
+        <span>Kernel API 地址</span>
+        <input id="baseUrl" type="url" value="http://localhost:8000">
+      </label>
+    </header>
+
+    <main class="layout">
+      <section class="panel">
+        <h2>Kernel 状态</h2>
+        <button id="healthBtn" type="button">检查状态</button>
+        <pre id="healthResult" class="result"></pre>
+      </section>
+
+      <section class="panel">
+        <h2>Profile 管理</h2>
+        <label>外部所有者 ID <input id="profileOwner" value="user_or_team_123"></label>
+        <button id="createProfileBtn" type="button">创建 Profile</button>
+        <label>Profile ID <input id="profileId" placeholder="p_xxx"></label>
+        <div class="row">
+          <button id="loginStartBtn" type="button">启动扫码登录</button>
+          <button id="loginStatusBtn" type="button">查看登录状态</button>
+        </div>
+        <div id="qrPanel" class="qrPanel" hidden>
+          <div class="qrHeader">
+            <strong>登录二维码</strong>
+            <button id="refreshQrBtn" type="button" class="secondary">刷新图片</button>
+          </div>
+          <img id="loginQrImage" alt="Bilibili 登录二维码">
+          <p class="note">二维码图片来自 kernel profile 登录页。页面不会显示 Cookie、QR token 或浏览器 profile 路径。</p>
+        </div>
+        <pre id="profileResult" class="result"></pre>
+      </section>
+
+      <section class="panel wide">
+        <h2>Cookie 导入测试</h2>
+        <p class="note">仅导入账号所有者自愿提供的 B 站 Cookie。页面不会回显 Cookie 内容，提交后会立即清空输入框。</p>
+        <label>格式
+          <select id="cookieFormat">
+            <option value="cookie_header">cookie_header</option>
+            <option value="netscape">netscape</option>
+            <option value="json">json</option>
+            <option value="playwright_storage_state">playwright_storage_state</option>
+          </select>
+        </label>
+        <label>Cookie 文件 <input id="cookieFile" type="file"></label>
+        <label>粘贴 Cookie Header
+          <textarea id="cookieText" rows="5" spellcheck="false" placeholder="name=value; other=value"></textarea>
+        </label>
+        <button id="importCookieBtn" type="button">导入到 Profile</button>
+        <pre id="cookieResult" class="result"></pre>
+      </section>
+
+      <section class="panel wide">
+        <h2>任务提交</h2>
+        <div class="grid">
+          <label>任务 ID <input id="jobId" value="j_001"></label>
+          <label>视频 URL 或 BV 号 <input id="jobUrl" placeholder="https://www.bilibili.com/video/BV..."></label>
+          <label>策略模式
+            <select id="strategyMode">
+              <option value="auto">auto</option>
+              <option value="force">force</option>
+            </select>
+          </label>
+          <label>强制策略
+            <select id="forceStrategy">
+              <option value="api_dash">api_dash</option>
+              <option value="browser_network">browser_network</option>
+              <option value="mse_sourcebuffer">mse_sourcebuffer</option>
+            </select>
+          </label>
+        </div>
+        <fieldset>
+          <legend>输出格式</legend>
+          <label><input type="checkbox" name="outputs" value="raw" checked> raw</label>
+          <label><input type="checkbox" name="outputs" value="m4a" checked> m4a</label>
+          <label><input type="checkbox" name="outputs" value="wav"> wav</label>
+        </fieldset>
+        <div class="row">
+          <button id="submitJobBtn" type="button">提交任务</button>
+          <button id="pollJobBtn" type="button">查询任务</button>
+        </div>
+        <pre id="jobResult" class="result"></pre>
+      </section>
+
+      <section class="panel wide">
+        <h2>产物</h2>
+        <button id="listArtifactsBtn" type="button">列出产物</button>
+        <div id="artifactResult" class="tableHost"></div>
+      </section>
+
+      <section class="panel wide">
+        <h2>策略</h2>
+        <div class="row">
+          <button id="listStrategiesBtn" type="button">列出策略</button>
+          <button id="strategyMetricsBtn" type="button">策略指标</button>
+        </div>
+        <div id="strategyResult" class="tableHost"></div>
+      </section>
+    </main>
+  </body>
+</html>
