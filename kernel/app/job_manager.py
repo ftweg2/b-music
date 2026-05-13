@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import asdict
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .artifact_manager import (
@@ -219,6 +221,130 @@ def request_cancel(job_id_value: str, settings: Settings | None = None) -> dict[
     with get_connection(settings) as conn:
         conn.execute("UPDATE jobs SET cancel_requested=1, updated_at=? WHERE job_id=?", (utc_now_iso(), job_id_value))
     return {"job_id": job_id_value, "status": "cancel_requested"}
+
+
+def recover_interrupted_runtime(settings: Settings | None = None) -> dict[str, int]:
+    settings = settings or get_settings()
+    now = utc_now_iso()
+    with get_connection(settings) as conn:
+        interrupted = conn.execute(
+            """
+            SELECT job_id FROM jobs
+            WHERE status NOT IN (?, ?, ?)
+            """,
+            (JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELLED),
+        ).fetchall()
+        job_ids = [str(row["job_id"]) for row in interrupted]
+        if job_ids:
+            placeholders = ",".join("?" for _ in job_ids)
+            conn.execute(
+                f"""
+                UPDATE jobs
+                SET status=?, stage=?, sanitized_error=?, updated_at=?, finished_at=?
+                WHERE job_id IN ({placeholders})
+                """,
+                (
+                    JobState.FAILED,
+                    JobState.FAILED,
+                    "kernel restarted before this job reached a terminal state",
+                    now,
+                    now,
+                    *job_ids,
+                ),
+            )
+        locks = conn.execute(
+            "SELECT profile_id FROM profiles WHERE active_job_id IS NOT NULL AND active_job_id<>''"
+        ).fetchall()
+        conn.execute(
+            """
+            UPDATE profiles
+            SET active_job_id=NULL, updated_at=?
+            WHERE active_job_id IS NOT NULL AND active_job_id<>''
+            """,
+            (now,),
+        )
+    return {"jobs_marked_failed": len(job_ids), "profile_locks_released": len(locks)}
+
+
+def cleanup_old_artifacts(settings: Settings | None = None, retention_hours: int | None = None) -> dict[str, int]:
+    settings = settings or get_settings()
+    retention = retention_hours if retention_hours is not None else settings.artifact_retention_hours
+    cutoff = datetime.now(UTC) - timedelta(hours=max(1, retention))
+    root = settings.artifacts_dir.resolve()
+    removed_jobs = 0
+    removed_files = 0
+    removed_bytes = 0
+    with get_connection(settings) as conn:
+        rows = conn.execute(
+            """
+            SELECT job_id, COALESCE(finished_at, updated_at, created_at) AS terminal_at
+            FROM jobs
+            WHERE status IN (?, ?, ?)
+            """,
+            (JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELLED),
+        ).fetchall()
+        for row in rows:
+            terminal_at = _parse_iso(str(row["terminal_at"]))
+            if terminal_at is None or terminal_at > cutoff:
+                continue
+            job_id_value = str(row["job_id"])
+            target = job_dir(job_id_value, settings).resolve()
+            if root not in target.parents or not target.exists():
+                continue
+            for file_path in target.rglob("*"):
+                if file_path.is_file():
+                    removed_files += 1
+                    removed_bytes += file_path.stat().st_size
+            shutil.rmtree(target, ignore_errors=True)
+            conn.execute("DELETE FROM artifacts WHERE job_id=?", (job_id_value,))
+            removed_jobs += 1
+    return {"artifact_jobs_removed": removed_jobs, "artifact_files_removed": removed_files, "artifact_bytes_removed": removed_bytes}
+
+
+def diagnostics(settings: Settings | None = None) -> dict[str, object]:
+    settings = settings or get_settings()
+    root = settings.artifacts_dir.resolve()
+    artifact_files = [path for path in root.rglob("*") if path.is_file()] if root.exists() else []
+    artifact_bytes = sum(path.stat().st_size for path in artifact_files)
+    with get_connection(settings) as conn:
+        job_states = conn.execute(
+            "SELECT status, COUNT(*) AS count FROM jobs GROUP BY status ORDER BY status"
+        ).fetchall()
+        active_locks = conn.execute(
+            """
+            SELECT profile_id, external_owner_id, active_job_id, updated_at
+            FROM profiles
+            WHERE active_job_id IS NOT NULL AND active_job_id<>''
+            ORDER BY updated_at
+            """
+        ).fetchall()
+        nonterminal_jobs = conn.execute(
+            """
+            SELECT job_id, status, stage, updated_at
+            FROM jobs
+            WHERE status NOT IN (?, ?, ?)
+            ORDER BY updated_at
+            """,
+            (JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELLED),
+        ).fetchall()
+        orphan_artifacts = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM artifacts a
+            LEFT JOIN jobs j ON j.job_id=a.job_id
+            WHERE j.job_id IS NULL
+            """
+        ).fetchone()
+    return {
+        "status": "ok",
+        "job_states": [dict(row) for row in job_states],
+        "active_locks": [dict(row) for row in active_locks],
+        "nonterminal_jobs": [dict(row) for row in nonterminal_jobs],
+        "orphan_artifact_rows": int(orphan_artifacts["count"] if orphan_artifacts else 0),
+        "artifact_files": len(artifact_files),
+        "artifact_bytes": artifact_bytes,
+        "artifact_retention_hours": settings.artifact_retention_hours,
+    }
 
 
 def list_artifacts(job_id_value: str, settings: Settings | None = None) -> list[dict[str, object]]:
@@ -547,3 +673,13 @@ def _save_artifacts(
                     record.mime_guess,
                 ),
             )
+
+
+def _parse_iso(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)

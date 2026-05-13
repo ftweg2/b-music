@@ -340,12 +340,16 @@ Android 不直接调用 kernel。
 Android 调 App：
 
 ```text
+https://music.example.com/api/kernel/login/status
+https://music.example.com/api/kernel/login/start
 https://music.example.com/api/search
 https://music.example.com/api/favorites
 https://music.example.com/api/creators
 https://music.example.com/api/tracks/prepare
 https://music.example.com/api/tracks/{id}/stream
 ```
+
+完整请求体和响应示例见 `src/docs/API_USAGE.md`。
 
 播放时：
 
@@ -541,4 +545,3 @@ docker image prune
 ```
 
 不要手动删除正在使用的 kernel profile。
-

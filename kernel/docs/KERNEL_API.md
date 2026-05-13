@@ -215,6 +215,68 @@ Security requirements:
 - Do not expose Cookie, storage state, browser profile files, sensitive headers, or full signed media URLs.
 - Do not use this endpoint for crawling, account pooling, or access-control bypass.
 
+## Video Resolve
+
+```http
+POST /v1/videos/resolve
+```
+
+Purpose: resolve a single Bilibili BV id into sanitized video metadata. This is useful when an App receives a direct BV id or video URL and wants metadata without exposing browser profile state.
+
+Request:
+
+```json
+{
+  "external_owner_id": "user_or_team_123",
+  "profile_id": "p_xxx",
+  "bvid": "BV1xx411c7mD"
+}
+```
+
+Response:
+
+```json
+{
+  "provider": "kernel_bilibili",
+  "profile_id": "p_xxx",
+  "logged_in": true,
+  "bvid": "BV1xx411c7mD",
+  "aid": "123",
+  "title": "example",
+  "description": "example",
+  "creator_mid": "123456",
+  "creator_name": "UP",
+  "cover_url": "https://i0.hdslb.com/...",
+  "duration_seconds": 260,
+  "pub_time": "2026-05-08T00:00:00+00:00",
+  "source_url": "https://www.bilibili.com/video/BV1xx411c7mD",
+  "category": "音乐",
+  "tags": [],
+  "pages": [
+    {
+      "cid": 123,
+      "page": 1,
+      "part": "P1"
+    }
+  ]
+}
+```
+
+Security requirements are the same as metadata search: validate profile ownership, return metadata only, and never return cookies, browser storage, sensitive headers, browser profile files, or signed media URLs.
+
+## Diagnostics
+
+```http
+GET /v1/diagnostics
+POST /v1/diagnostics/cleanup/artifacts
+```
+
+`GET /v1/diagnostics` returns sanitized runtime/storage health such as job state counts, active profile locks, nonterminal jobs, orphan artifact rows, artifact file count, artifact bytes, and artifact retention hours.
+
+`POST /v1/diagnostics/cleanup/artifacts` runs artifact retention cleanup immediately.
+
+Do not expose diagnostics directly to untrusted clients. It is intended for App backend, operators, or future trusted backend services.
+
 Job states:
 
 - `queued`

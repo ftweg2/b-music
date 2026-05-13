@@ -1,6 +1,8 @@
 import {
   createOrReuseTrack,
+  getCandidateByBvid,
   getCandidateById,
+  getOrHydrateFavoriteCandidateByBvid,
   getTrackById,
   updateTrack
 } from "./db";
@@ -12,14 +14,16 @@ import {
   type KernelJobStatus
 } from "./kernelClient";
 import type { Track } from "./models";
-import { sanitizeText } from "./sanitize";
+import { sanitizeBvid, sanitizeText } from "./sanitize";
 
 type StrategyName = "api_dash" | "browser_network" | "mse_sourcebuffer";
 type StrategyMode = "auto" | "force";
 
 export type PrepareTrackInput = {
-  candidateId: number;
+  candidateId?: number;
+  bvid?: string;
   profileId: string;
+  appOwnerId?: string;
   externalOwnerId?: string;
   strategyMode?: StrategyMode;
   strategy?: StrategyName;
@@ -30,12 +34,15 @@ export type PrepareTrackInput = {
 const TERMINAL_FAILED = new Set(["failed", "cancelled"]);
 
 export async function prepareTrack(input: PrepareTrackInput): Promise<Track> {
-  const candidate = getCandidateById(input.candidateId);
+  const candidate = resolvePlayableCandidate(input);
   if (!candidate) {
     throw new Error("候选视频不存在");
   }
   const profileId = sanitizeRequired(input.profileId, "请先填写 kernel profile_id");
-  const externalOwnerId = sanitizeText(input.externalOwnerId || process.env.KERNEL_EXTERNAL_OWNER_ID || "local", 128);
+  const externalOwnerId = sanitizeText(
+    input.externalOwnerId || process.env.KERNEL_EXTERNAL_OWNER_ID || process.env.APP_OWNER_ID || "local",
+    128
+  );
   const strategyMode = normalizeStrategyMode(input.strategyMode);
   if (strategyMode === "force" && !input.strategy) {
     throw new Error("强制策略模式需要指定 strategy");
@@ -94,6 +101,30 @@ export async function refreshTrack(
     candidateId: track.candidateId,
     forceRefresh: true
   });
+}
+
+function resolvePlayableCandidate(input: PrepareTrackInput) {
+  if (Number.isFinite(input.candidateId)) {
+    const candidate = getCandidateById(Number(input.candidateId));
+    if (candidate) {
+      return candidate;
+    }
+  }
+  const bvid = sanitizeBvid(input.bvid);
+  if (!bvid) {
+    return null;
+  }
+  const externalOwnerId = sanitizeText(
+    input.externalOwnerId || process.env.KERNEL_EXTERNAL_OWNER_ID || process.env.APP_OWNER_ID || "local",
+    128
+  );
+  const appOwnerId = sanitizeText(input.appOwnerId || externalOwnerId, 128);
+  return (
+    getCandidateByBvid(bvid) ||
+    getOrHydrateFavoriteCandidateByBvid(bvid, appOwnerId) ||
+    getOrHydrateFavoriteCandidateByBvid(bvid, externalOwnerId) ||
+    getOrHydrateFavoriteCandidateByBvid(bvid, "local")
+  );
 }
 
 export async function getSyncedTrack(trackId: number): Promise<Track | null> {

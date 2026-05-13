@@ -4,7 +4,7 @@ import { notFound } from "next/navigation";
 import { PlayCandidateButton } from "@/components/PlayCandidateButton";
 import { RecommendationReasons } from "@/components/RecommendationReasons";
 import { currentAppOwnerId } from "@/lib/appOwner";
-import { favoriteCandidateIds, getCandidateById, listCandidateInteractions } from "@/lib/db";
+import { favoriteBvids, getCandidateById, listCandidateInteractions } from "@/lib/db";
 import { safeInternalReturnTo } from "@/lib/navigation";
 import { toCandidateWithScore } from "@/lib/search/cache";
 
@@ -24,7 +24,7 @@ export default async function CandidateDetailPage({ params, searchParams }: Prop
     notFound();
   }
   const ownerId = await currentAppOwnerId();
-  const withScore = toCandidateWithScore(candidate, undefined, favoriteCandidateIds([candidate.id], ownerId).has(candidate.id));
+  const withScore = toCandidateWithScore(candidate, undefined, favoriteBvids([candidate.bvid], ownerId).has(candidate.bvid));
   const interactions = listCandidateInteractions(candidate.id, ownerId);
 
   return (

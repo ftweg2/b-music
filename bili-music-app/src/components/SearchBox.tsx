@@ -12,8 +12,6 @@ type StoredSearchState = {
   keyword: string;
   useRemote: boolean;
   provider: ProviderChoice;
-  externalOwnerId: string;
-  profileId: string;
   limit: number;
   page: number;
   hasNextPage: boolean;
@@ -28,8 +26,6 @@ export function SearchBox() {
   const [keyword, setKeyword] = useState("");
   const [useRemote, setUseRemote] = useState(true);
   const [provider, setProvider] = useState<ProviderChoice>("bilibili");
-  const [externalOwnerId, setExternalOwnerId] = useState("local");
-  const [profileId, setProfileId] = useState("");
   const [limit, setLimit] = useState(20);
   const [page, setPage] = useState(1);
   const [hasNextPage, setHasNextPage] = useState(false);
@@ -49,28 +45,12 @@ export function SearchBox() {
     setKeyword(next.keyword);
     setUseRemote(next.useRemote);
     setProvider(next.provider);
-    setExternalOwnerId(next.externalOwnerId);
-    setProfileId(next.profileId);
     setLimit(next.limit);
     setPage(next.page);
     setHasNextPage(savedMatches ? saved?.hasNextPage ?? next.hasNextPage : false);
     setMessage(savedMatches ? saved?.message ?? next.message : "已从 URL 恢复搜索条件，点击“开始发现”可重新拉取结果。");
     setCandidates(savedMatches ? saved?.candidates ?? [] : []);
   }, []);
-
-  useEffect(() => {
-    if (provider !== "kernel") {
-      return;
-    }
-    const savedOwnerId = window.localStorage.getItem("kernel_external_owner_id");
-    const savedProfileId = window.localStorage.getItem("kernel_profile_id");
-    if (savedOwnerId && externalOwnerId === "local") {
-      setExternalOwnerId(savedOwnerId);
-    }
-    if (savedProfileId && !profileId) {
-      setProfileId(savedProfileId);
-    }
-  }, [provider, externalOwnerId, profileId]);
 
   async function search(event?: FormEvent<HTMLFormElement>, requestedPage = 1) {
     event?.preventDefault();
@@ -93,9 +73,7 @@ export function SearchBox() {
           useRemote,
           limit: safeLimit,
           page: safePage,
-          provider,
-          externalOwnerId,
-          profileId
+          provider
         })
       });
       const payload = await response.json();
@@ -117,8 +95,6 @@ export function SearchBox() {
         keyword: cleanKeyword,
         useRemote,
         provider,
-        externalOwnerId,
-        profileId,
         limit: safeLimit,
         page: nextPage,
         hasNextPage: nextHasNextPage,
@@ -146,7 +122,7 @@ export function SearchBox() {
           <div className="searchPrimary">
             <label className="keywordField">
               关键词
-              <input value={keyword} onChange={(event) => setKeyword(event.target.value)} placeholder="比如：花之舞 / 洛天依 / cover" />
+              <input value={keyword} onChange={(event) => setKeyword(event.target.value)} placeholder="歌曲名、UP、BV号或 Bilibili 视频链接" />
             </label>
             <button className="searchButton" type="submit" disabled={loading}>
               {loading ? "搜索中..." : "开始发现"}
@@ -178,39 +154,11 @@ export function SearchBox() {
             </label>
           </div>
 
-          {useRemote && provider === "kernel" ? (
-            <div className="kernelInline">
-              <label>
-                外部用户/团队 ID
-                <input
-                  value={externalOwnerId}
-                  onChange={(event) => setExternalOwnerId(event.target.value)}
-                />
-              </label>
-              <label>
-                Kernel profile_id
-                <input
-                  value={profileId}
-                  onChange={(event) => setProfileId(event.target.value)}
-                  placeholder="p_xxx"
-                />
-              </label>
-              <p className="note">内核登录态搜索只把 owner/profile 传给 kernel，Cookie 不会回到 App。</p>
-            </div>
-          ) : null}
-
           {message ? <p className="note searchMessage">{message}</p> : null}
         </form>
       </section>
 
-      {provider === "kernel" && useRemote ? (
-        <KernelLoginPanel
-          externalOwnerId={externalOwnerId}
-          profileId={profileId}
-          onExternalOwnerIdChange={setExternalOwnerId}
-          onProfileIdChange={setProfileId}
-        />
-      ) : null}
+      {provider === "kernel" && useRemote ? <KernelLoginPanel /> : null}
 
       <CandidateList candidates={candidates} />
 
@@ -256,8 +204,6 @@ function searchStateFromParams(params: URLSearchParams): StoredSearchState | nul
     keyword,
     useRemote: params.get("remote") !== "0",
     provider,
-    externalOwnerId: params.get("owner") || "local",
-    profileId: params.get("profile") || "",
     limit: clampLimit(Number(params.get("limit") || 20)),
     page: clampPage(Number(params.get("page") || 1)),
     hasNextPage: false,
@@ -275,12 +221,6 @@ function replaceSearchUrl(state: StoredSearchState): void {
   params.set("limit", String(state.limit));
   if (state.page > 1) {
     params.set("page", String(state.page));
-  }
-  if (state.provider === "kernel") {
-    params.set("owner", state.externalOwnerId);
-    if (state.profileId) {
-      params.set("profile", state.profileId);
-    }
   }
   window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}`);
 }
@@ -313,8 +253,6 @@ function sameSearchIdentity(left: StoredSearchState, right: StoredSearchState): 
     left.keyword === right.keyword &&
     left.useRemote === right.useRemote &&
     left.provider === right.provider &&
-    left.externalOwnerId === right.externalOwnerId &&
-    left.profileId === right.profileId &&
     left.limit === right.limit &&
     left.page === right.page
   );

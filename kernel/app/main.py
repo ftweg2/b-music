@@ -5,7 +5,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.db import init_db
-from app.routers import artifacts, jobs, profiles, search, strategies
+from app.job_manager import cleanup_old_artifacts, recover_interrupted_runtime
+from app.routers import artifacts, diagnostics, jobs, profiles, search, strategies, videos
 from app.schemas import HealthResponse
 
 
@@ -29,6 +30,8 @@ app.add_middleware(
 def startup() -> None:
     settings.ensure_dirs()
     init_db(settings)
+    recover_interrupted_runtime(settings)
+    cleanup_old_artifacts(settings)
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -46,3 +49,5 @@ app.include_router(jobs.router)
 app.include_router(artifacts.router)
 app.include_router(search.router)
 app.include_router(strategies.router)
+app.include_router(diagnostics.router)
+app.include_router(videos.router)

@@ -53,21 +53,17 @@ export function PlayerDock() {
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(0.82);
   const [playbackMode, setPlaybackMode] = useState<PlaybackMode>("sequence");
-  const [externalOwnerId, setExternalOwnerId] = useState("local");
-  const [profileId, setProfileId] = useState("");
   const [strategy, setStrategy] = useState<StrategyChoice>("api_dash");
   const [isExpanded, setIsExpanded] = useState(false);
 
   const currentItem = currentIndex >= 0 ? queue[currentIndex] : null;
   const nextCandidateIndex = nextIndexOnManual(currentIndex, queue.length, playbackMode, "next");
   const nextItem = nextCandidateIndex === null ? null : queue[nextCandidateIndex];
-  const streamSrc = track?.status === "ready" ? `/api/tracks/${track.id}/stream` : "";
+  const streamSrc = track?.status === "ready" ? `/api/tracks/${track.id}/stream` : undefined;
   const hasPlayerContent = queue.length > 0 || Boolean(track);
   const isCompact = !hasPlayerContent || !isExpanded;
 
   useEffect(() => {
-    setExternalOwnerId(window.localStorage.getItem("kernel_external_owner_id") || "local");
-    setProfileId(window.localStorage.getItem("kernel_profile_id") || "");
     const stored = readStoredPlayerState();
     if (stored) {
       setQueue(stored.queue);
@@ -79,22 +75,12 @@ export function PlayerDock() {
   }, []);
 
   useEffect(() => {
-    window.localStorage.setItem("kernel_external_owner_id", externalOwnerId || "local");
-  }, [externalOwnerId]);
-
-  useEffect(() => {
-    if (profileId) {
-      window.localStorage.setItem("kernel_profile_id", profileId);
-    }
-  }, [profileId]);
-
-  useEffect(() => {
     writeStoredPlayerState({ queue, history, currentIndex, playbackMode, volume });
   }, [queue, history, currentIndex, playbackMode, volume]);
 
   useEffect(() => {
     prewarmedRef.current.clear();
-  }, [externalOwnerId, profileId, strategy]);
+  }, [strategy]);
 
   useEffect(() => {
     const handlePlay = (event: Event) => {
@@ -112,8 +98,8 @@ export function PlayerDock() {
           }
           return [...current, item];
         });
-        setMessage(profileId ? "已加入队列，正在后台预热音频" : "已加入队列；填写 kernel profile 后再预热音频");
-        if (profileId && !prewarmedRef.current.has(item.candidateId)) {
+        setMessage("已加入队列，正在后台预热音频");
+        if (!prewarmedRef.current.has(item.candidateId)) {
           prewarmedRef.current.add(item.candidateId);
           void prepareCandidate(item, true);
         }
@@ -133,7 +119,7 @@ export function PlayerDock() {
     };
     window.addEventListener("bili-music:play-candidate", handlePlay);
     return () => window.removeEventListener("bili-music:play-candidate", handlePlay);
-  }, [externalOwnerId, profileId, strategy]);
+  }, [strategy]);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -181,12 +167,6 @@ export function PlayerDock() {
   }, [currentTime, duration]);
 
   async function prepareCandidate(item: QueueItem, prewarm: boolean) {
-    if (!profileId) {
-      if (!prewarm) {
-        setMessage("请先填写 kernel profile_id，再准备音频");
-      }
-      return;
-    }
     if (!prewarm) {
       setBusy(true);
       setTrack(null);
@@ -195,8 +175,7 @@ export function PlayerDock() {
     try {
       const payload = await postJson<{ track: Track }>("/api/tracks/prepare", {
         candidateId: item.candidateId,
-        profileId,
-        externalOwnerId,
+        bvid: item.bvid,
         strategyMode: strategy === "auto" ? "auto" : "force",
         strategy: strategy === "auto" ? undefined : strategy,
         strategyOrder: strategy === "auto" ? PLAYBACK_AUTO_STRATEGY_ORDER : undefined
@@ -233,16 +212,10 @@ export function PlayerDock() {
       }
       return;
     }
-    if (!profileId) {
-      setMessage("请先填写 kernel profile_id，再重新准备");
-      return;
-    }
     setBusy(true);
     setMessage("正在重新准备音频...");
     try {
       const payload = await postJson<{ track: Track }>(`/api/tracks/${track.id}/refresh`, {
-        profileId,
-        externalOwnerId,
         strategyMode: strategy === "auto" ? "auto" : "force",
         strategy: strategy === "auto" ? undefined : strategy,
         strategyOrder: strategy === "auto" ? PLAYBACK_AUTO_STRATEGY_ORDER : undefined
@@ -372,6 +345,25 @@ export function PlayerDock() {
     setCurrentTime(nextTime);
   }
 
+  async function favoriteCurrentItem() {
+    if (!currentItem) {
+      setMessage("先播放一首歌，再收藏。");
+      return;
+    }
+    setBusy(true);
+    try {
+      await postJson("/api/favorites", {
+        candidateId: currentItem.candidateId,
+        bvid: currentItem.bvid
+      });
+      setMessage(`已收藏：${currentItem.title}`);
+    } catch (error) {
+      setMessage(String(error instanceof Error ? error.message : error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <aside className={isCompact ? "playerDock playerDockCompact" : "playerDock"} aria-label="音乐播放器">
       <audio
@@ -395,6 +387,9 @@ export function PlayerDock() {
           </div>
           <button type="button" onClick={() => void togglePlay()} disabled={busy || (!currentItem && !track)}>
             {isPlaying ? "暂停" : track?.status === "ready" ? "播放" : "准备"}
+          </button>
+          <button type="button" className="secondary" onClick={() => void favoriteCurrentItem()} disabled={busy || !currentItem}>
+            收藏
           </button>
           <button type="button" className="secondary" onClick={() => setIsExpanded(true)}>
             展开
@@ -438,6 +433,9 @@ export function PlayerDock() {
           </button>
           <button type="button" className="secondary" onClick={() => setPlaybackMode(nextPlaybackMode(playbackMode))}>
             {playbackModeLabel(playbackMode)}
+          </button>
+          <button type="button" className="secondary" onClick={() => void favoriteCurrentItem()} disabled={busy || !currentItem}>
+            收藏当前
           </button>
           <button type="button" className="ghost" onClick={() => void refreshCurrentTrack()} disabled={busy || (!currentItem && !track)}>
             重新准备
@@ -507,16 +505,8 @@ export function PlayerDock() {
           ) : null}
         </details>
         <details className="kernelSettings">
-          <summary>内核设置</summary>
+          <summary>播放策略</summary>
           <div className="miniGrid">
-            <label>
-              owner
-              <input value={externalOwnerId} onChange={(event) => setExternalOwnerId(event.target.value)} />
-            </label>
-            <label>
-              profile
-              <input value={profileId} onChange={(event) => setProfileId(event.target.value)} placeholder="p_xxx" />
-            </label>
             <label>
               策略
               <select value={strategy} onChange={(event) => setStrategy(event.target.value as StrategyChoice)}>

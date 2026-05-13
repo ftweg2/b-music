@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { ensureDefaultKernelProfile } from "@/lib/kernelSession";
 import { refreshTrack } from "@/lib/tracks";
 import { sanitizeText } from "@/lib/sanitize";
 
@@ -13,9 +14,10 @@ export async function POST(request: Request, { params }: Params) {
   try {
     const { id } = await params;
     const body = await request.json();
+    const profile = await ensureDefaultKernelProfile();
     const track = await refreshTrack(Number(id), {
-      profileId: body.profileId || body.profile_id || "",
-      externalOwnerId: body.externalOwnerId || body.external_owner_id,
+      profileId: profile.profile_id,
+      externalOwnerId: profile.external_owner_id,
       strategyMode: body.strategyMode || body.strategy_mode,
       strategy: body.strategy,
       strategyOrder: body.strategyOrder || body.strategy_order

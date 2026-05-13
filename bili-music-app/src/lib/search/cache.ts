@@ -1,5 +1,6 @@
 import {
-  favoriteCandidateIds,
+  favoriteBvids,
+  getCandidateByBvid,
   interactionCounts,
   listPreferredCreators,
   logSearchQuery,
@@ -49,9 +50,12 @@ export async function runSearch(request: SearchRequest): Promise<SearchResponseP
   const provider = getSearchProvider(request.provider);
   const appOwnerId = request.appOwnerId || "local";
   const preferredCreators = listPreferredCreators(appOwnerId);
+  const directBvid = sanitizeBvid(keyword);
+  const directCandidate = directBvid && page === 1 ? directCandidateFromKeyword(keyword, directBvid, preferredCreators) : null;
   const includeLocalDiscovery = !request.useRemote || page === 1;
   const local = includeLocalDiscovery
     ? mergeCandidates(
+        directCandidate ? [directCandidate] : [],
         searchLocalCandidates(keyword, poolLimit),
         searchFollowedCreatorCandidates(keyword, preferredCreators, poolLimit),
         searchFavoriteCandidates(keyword, poolLimit, appOwnerId)
@@ -86,8 +90,8 @@ export async function runSearch(request: SearchRequest): Promise<SearchResponseP
   }
 
   const interactions = interactionCounts(candidates.map((candidate) => candidate.id), appOwnerId);
-  const favorites = favoriteCandidateIds(candidates.map((candidate) => candidate.id), appOwnerId);
-  const allRanked = sortByRank(candidates, keyword, preferredCreators, interactions);
+  const favorites = favoriteBvids(candidates.map((candidate) => candidate.bvid), appOwnerId);
+  const allRanked = pinBvidFirst(sortByRank(candidates, keyword, preferredCreators, interactions), directBvid);
   const pageItems = allRanked.slice(offset, offset + limit);
   const ranked = pageItems
     .map(({ candidate, scoreBreakdown, isPreferredCreator }) => {
@@ -106,7 +110,7 @@ export async function runSearch(request: SearchRequest): Promise<SearchResponseP
           scoreBreakdownJson: JSON.stringify(scoreBreakdown)
         },
         isPreferredCreator,
-        favorites.has(candidate.id)
+        favorites.has(candidate.bvid)
       );
     });
 
@@ -200,6 +204,38 @@ function mergeCandidates(...groups: CandidateVideo[][]): CandidateVideo[] {
     byBvid.set(item.bvid, item);
   }
   return Array.from(byBvid.values());
+}
+
+function directCandidateFromKeyword(
+  keyword: string,
+  bvid: string,
+  preferredCreators: ReturnType<typeof listPreferredCreators>
+): CandidateVideo {
+  const existing = getCandidateByBvid(bvid);
+  if (existing) {
+    return existing;
+  }
+  return upsertRankedCandidate(
+    normalizeRawSearchResult(
+      {
+        bvid,
+        title: `Bilibili 视频 ${bvid}`,
+        sourceUrl: `https://www.bilibili.com/video/${bvid}`,
+        tags: ["direct"]
+      },
+      bvid,
+      "direct_url"
+    ),
+    preferredCreators,
+    bvid
+  );
+}
+
+function pinBvidFirst<T extends { candidate: CandidateVideo }>(items: T[], bvid: string): T[] {
+  if (!bvid) {
+    return items;
+  }
+  return [...items].sort((left, right) => Number(right.candidate.bvid === bvid) - Number(left.candidate.bvid === bvid));
 }
 
 async function searchFollowedCreatorsRemote({

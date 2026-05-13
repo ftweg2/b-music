@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { currentAppOwnerId } from "@/lib/appOwner";
-import { addCandidateInteraction, favoriteCandidateIds, getCandidateById, listCandidateInteractions } from "@/lib/db";
+import { addCandidateInteraction, favoriteBvids, getCandidateById, listCandidateInteractions } from "@/lib/db";
 import type { InteractionAction } from "@/lib/models";
 import { sanitizeText } from "@/lib/sanitize";
 import { toCandidateWithScore } from "@/lib/search/cache";
@@ -23,7 +23,7 @@ export async function GET(_request: Request, { params }: Params) {
   const ownerId = await currentAppOwnerId();
   return NextResponse.json({
     ownerId,
-    candidate: toCandidateWithScore(candidate, undefined, favoriteCandidateIds([candidate.id], ownerId).has(candidate.id)),
+    candidate: toCandidateWithScore(candidate, undefined, favoriteBvids([candidate.bvid], ownerId).has(candidate.bvid)),
     interactions: listCandidateInteractions(candidate.id, ownerId)
   });
 }

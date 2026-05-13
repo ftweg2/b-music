@@ -2,7 +2,8 @@ import { NextResponse } from "next/server";
 
 import {
   createFavoriteVideo,
-  favoriteCandidateIds,
+  favoriteBvids,
+  getCandidateByBvid,
   getCandidateById,
   listFavoriteVideos
 } from "@/lib/db";
@@ -16,11 +17,11 @@ export async function GET() {
   const ownerId = await currentAppOwnerId();
   const rows = listFavoriteVideos(100, ownerId);
   const candidates = rows.map((row) => row.candidate);
-  const favorites = favoriteCandidateIds(candidates.map((candidate) => candidate.id), ownerId);
+  const favorites = favoriteBvids(candidates.map((candidate) => candidate.bvid), ownerId);
   return NextResponse.json({
     ownerId,
     favorites: rows.map((row) => row.favorite),
-    candidates: candidates.map((candidate) => toCandidateWithScore(candidate, undefined, favorites.has(candidate.id)))
+    candidates: candidates.map((candidate) => toCandidateWithScore(candidate, undefined, favorites.has(candidate.bvid)))
   });
 }
 
@@ -29,7 +30,7 @@ export async function POST(request: Request) {
     const body = await request.json();
     const candidateId = Number(body.candidateId);
     const ownerId = await currentAppOwnerId();
-    const candidate = getCandidateById(candidateId);
+    const candidate = getCandidateById(candidateId) || getCandidateByBvid(String(body.bvid || ""));
     if (!candidate) {
       return NextResponse.json({ error: "候选视频不存在" }, { status: 404 });
     }

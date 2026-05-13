@@ -1,6 +1,6 @@
 import { CandidateList } from "@/components/CandidateList";
 import { currentAppOwnerId } from "@/lib/appOwner";
-import { favoriteCandidateIds, listFavoriteVideos } from "@/lib/db";
+import { favoriteBvids, listFavoriteVideos } from "@/lib/db";
 import { toCandidateWithScore } from "@/lib/search/cache";
 
 export const dynamic = "force-dynamic";
@@ -9,8 +9,8 @@ export default async function FavoritesPage() {
   const ownerId = await currentAppOwnerId();
   const rows = listFavoriteVideos(100, ownerId);
   const candidates = rows.map((row) => row.candidate);
-  const favorites = favoriteCandidateIds(candidates.map((candidate) => candidate.id), ownerId);
-  const withScores = candidates.map((candidate) => toCandidateWithScore(candidate, undefined, favorites.has(candidate.id)));
+  const favorites = favoriteBvids(candidates.map((candidate) => candidate.bvid), ownerId);
+  const withScores = candidates.map((candidate) => toCandidateWithScore(candidate, undefined, favorites.has(candidate.bvid)));
 
   return (
     <>

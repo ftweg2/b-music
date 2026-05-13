@@ -147,6 +147,19 @@ class VideoSearchResponse(BaseModel):
     results: list[VideoSearchResult]
 
 
+class VideoResolveRequest(BaseModel):
+    external_owner_id: str = Field(min_length=1, max_length=128)
+    profile_id: str
+    bvid: str = Field(min_length=12, max_length=32)
+
+
+class VideoResolveResponse(VideoSearchResult):
+    provider: Literal["kernel_bilibili"]
+    profile_id: str
+    logged_in: bool
+    pages: list[dict[str, object]] = Field(default_factory=list)
+
+
 class StrategyListResponse(BaseModel):
     strategies: list[str] = Field(default_factory=lambda: list(StrategyName.ALL))
     default_order: list[str] = Field(default_factory=lambda: list(StrategyName.ALL))

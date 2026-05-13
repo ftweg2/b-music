@@ -6,7 +6,7 @@ export default function SettingsPage() {
     <>
       <header className="pageHeader">
         <h2>设置</h2>
-        <p>当前只配置 App 层参数；音频准备会在后续通过 HTTP 接入外部内核。</p>
+        <p>App 负责音乐库和播放体验；登录态、音频准备和临时 artifact 都由内核通过 HTTP 承担。</p>
       </header>
       <section className="panel">
         <table className="table">
@@ -20,16 +20,12 @@ export default function SettingsPage() {
               <td>{providerMode()}</td>
             </tr>
             <tr>
-              <th>内核地址占位</th>
+              <th>内核地址</th>
               <td>{kernelBaseUrl()}</td>
             </tr>
             <tr>
-              <th>内核搜索 profile</th>
-              <td>{process.env.KERNEL_PROFILE_ID || "页面搜索时手动填写"}</td>
-            </tr>
-            <tr>
-              <th>内核 owner</th>
-              <td>{process.env.KERNEL_EXTERNAL_OWNER_ID || "local / 页面搜索时手动填写"}</td>
+              <th>账号模式</th>
+              <td>{process.env.APP_SINGLE_USER_MODE === "0" ? "多账号兼容模式" : "单账号同步模式"}</td>
             </tr>
             <tr>
               <th>Track artifact TTL</th>
@@ -47,10 +43,10 @@ export default function SettingsPage() {
         </table>
       </section>
       <section className="panel">
-        <h3 className="panelTitle">后续动作</h3>
+        <h3 className="panelTitle">运行边界</h3>
         <p className="note">
-          当前播放器通过 HTTP 调用外部内核准备 `audio.m4a`，再由 `/api/tracks/:id/stream`
-          代理给浏览器原生 audio 播放。App 不实现提取，也不下载或保存音频文件。
+          扫码登录会自动使用默认内核 profile。网页端和手机端访问同一个 App 服务时，共享同一个收藏歌曲和喜欢的 UP 列表。
+          App 只保存候选、收藏和 Track metadata；音频 artifact 留在内核，由 `/api/tracks/:id/stream` 代理给浏览器播放。
         </p>
       </section>
     </>

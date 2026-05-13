@@ -7,13 +7,48 @@ function baseUrl() {
   return $("baseUrl").value.replace(/\/+$/, "");
 }
 
-function show(target, payload) {
+function setState(el, state) {
+  if (!el) {
+    return;
+  }
+  if (state) {
+    el.dataset.state = state;
+  } else {
+    delete el.dataset.state;
+  }
+}
+
+function show(target, payload, state = "success") {
   const el = typeof target === "string" ? $(target) : target;
+  setState(el, state);
   el.textContent = typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
 }
 
 function showError(target, error) {
-  show(target, { 错误: String(error.message || error) });
+  show(target, { 错误: String(error.message || error) }, "error");
+}
+
+function setBusy(button, busy) {
+  if (!button) {
+    return;
+  }
+  if (!button.dataset.label) {
+    button.dataset.label = button.textContent;
+  }
+  button.disabled = busy;
+  button.textContent = busy ? "处理中..." : button.dataset.label;
+}
+
+function bindAction(id, handler) {
+  const button = $(id);
+  button.addEventListener("click", async () => {
+    setBusy(button, true);
+    try {
+      await handler();
+    } finally {
+      setBusy(button, false);
+    }
+  });
 }
 
 async function apiFetch(path, options = {}) {
@@ -84,9 +119,29 @@ function withCacheBust(url) {
   return `${url}${url.includes("?") ? "&" : "?"}_ts=${Date.now()}`;
 }
 
+function formatBytes(value) {
+  const bytes = Number(value || 0);
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 B";
+  }
+  const units = ["B", "KB", "MB", "GB"];
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  return `${(bytes / 1024 ** index).toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+}
+
 function renderTable(hostId, columns, rows, linkBuilder) {
   const host = $(hostId);
   host.textContent = "";
+  setState(host, "success");
+
+  if (!rows.length) {
+    const empty = document.createElement("div");
+    empty.className = "emptyState";
+    empty.textContent = "暂无数据。";
+    host.appendChild(empty);
+    return;
+  }
+
   const table = document.createElement("table");
   const thead = document.createElement("thead");
   const headerRow = document.createElement("tr");
@@ -103,11 +158,13 @@ function renderTable(hostId, columns, rows, linkBuilder) {
     const tr = document.createElement("tr");
     for (const column of columns) {
       const td = document.createElement("td");
+      td.dataset.label = column.label;
       if (linkBuilder && column.key === "download") {
         const link = document.createElement("a");
         link.href = linkBuilder(row);
         link.textContent = "下载";
         link.target = "_blank";
+        link.rel = "noreferrer";
         td.appendChild(link);
       } else {
         td.textContent = String(row[column.key] ?? "");
@@ -218,20 +275,24 @@ async function pollJob() {
 async function listArtifacts() {
   try {
     const payload = await apiFetch(`/v1/jobs/${encodeURIComponent(jobId())}/artifacts`);
+    const rows = (payload.artifacts || []).map((artifact) => ({
+      ...artifact,
+      size_label: formatBytes(artifact.size_bytes)
+    }));
     renderTable(
       "artifactResult",
       [
         { key: "name", label: "名称" },
-        { key: "size_bytes", label: "大小" },
+        { key: "size_label", label: "大小" },
         { key: "sha256", label: "sha256" },
         { key: "producer_strategy", label: "生成策略" },
         { key: "download", label: "下载" }
       ],
-      payload.artifacts || [],
+      rows,
       (row) => `${baseUrl()}/v1/jobs/${encodeURIComponent(jobId())}/artifacts/${encodeURIComponent(row.name)}`
     );
   } catch (error) {
-    $("artifactResult").textContent = String(error.message || error);
+    showError("artifactResult", error);
   }
 }
 
@@ -239,7 +300,7 @@ async function listStrategies() {
   try {
     show("strategyResult", await apiFetch("/v1/strategies"));
   } catch (error) {
-    $("strategyResult").textContent = String(error.message || error);
+    showError("strategyResult", error);
   }
 }
 
@@ -248,7 +309,10 @@ async function strategyMetrics() {
     const payload = await apiFetch("/v1/strategies/metrics");
     const rows = (payload.metrics || []).map((metric) => ({
       ...metric,
-      success_rate: metric.total_attempts ? (metric.success_count / metric.total_attempts).toFixed(3) : "0.000"
+      success_rate: metric.total_attempts ? (metric.success_count / metric.total_attempts).toFixed(3) : "0.000",
+      avg_duration_label: Number.isFinite(Number(metric.avg_duration_ms))
+        ? `${Number(metric.avg_duration_ms).toFixed(0)} ms`
+        : ""
     }));
     renderTable(
       "strategyResult",
@@ -258,27 +322,27 @@ async function strategyMetrics() {
         { key: "success_count", label: "成功" },
         { key: "fail_count", label: "失败" },
         { key: "success_rate", label: "成功率" },
-        { key: "avg_duration_ms", label: "平均耗时 ms" },
+        { key: "avg_duration_label", label: "平均耗时" },
         { key: "last_failure_reason", label: "最近失败原因" }
       ],
       rows
     );
   } catch (error) {
-    $("strategyResult").textContent = String(error.message || error);
+    showError("strategyResult", error);
   }
 }
 
 window.addEventListener("DOMContentLoaded", () => {
   $("baseUrl").value = config.defaultBaseUrl || "http://localhost:8000";
-  $("healthBtn").addEventListener("click", checkHealth);
-  $("createProfileBtn").addEventListener("click", createProfile);
-  $("loginStartBtn").addEventListener("click", loginStart);
-  $("loginStatusBtn").addEventListener("click", loginStatus);
-  $("refreshQrBtn").addEventListener("click", refreshQrImage);
-  $("importCookieBtn").addEventListener("click", importCookie);
-  $("submitJobBtn").addEventListener("click", submitJob);
-  $("pollJobBtn").addEventListener("click", pollJob);
-  $("listArtifactsBtn").addEventListener("click", listArtifacts);
-  $("listStrategiesBtn").addEventListener("click", listStrategies);
-  $("strategyMetricsBtn").addEventListener("click", strategyMetrics);
+  bindAction("healthBtn", checkHealth);
+  bindAction("createProfileBtn", createProfile);
+  bindAction("loginStartBtn", loginStart);
+  bindAction("loginStatusBtn", loginStatus);
+  bindAction("refreshQrBtn", refreshQrImage);
+  bindAction("importCookieBtn", importCookie);
+  bindAction("submitJobBtn", submitJob);
+  bindAction("pollJobBtn", pollJob);
+  bindAction("listArtifactsBtn", listArtifacts);
+  bindAction("listStrategiesBtn", listStrategies);
+  bindAction("strategyMetricsBtn", strategyMetrics);
 });

@@ -55,7 +55,7 @@ export function CandidateCard({ candidate }: { candidate: CandidateWithScore }) 
       const response = await fetch(favorited ? `/api/favorites/${candidate.id}` : "/api/favorites", {
         method: favorited ? "DELETE" : "POST",
         headers: favorited ? undefined : { "content-type": "application/json" },
-        body: favorited ? undefined : JSON.stringify({ candidateId: candidate.id })
+        body: favorited ? undefined : JSON.stringify({ candidateId: candidate.id, bvid: candidate.bvid })
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {

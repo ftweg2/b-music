@@ -59,9 +59,21 @@ export type CandidateInteraction = {
 export type FavoriteVideo = {
   id: number;
   externalOwnerId: string;
-  candidateId: number;
+  candidateId: number | null;
+  bvid: string;
   note: string | null;
   mood: string | null;
+  titleSnapshot: string;
+  sourceUrlSnapshot: string;
+  creatorMidSnapshot: string | null;
+  creatorNameSnapshot: string | null;
+  coverUrlSnapshot: string | null;
+  durationSecondsSnapshot: number | null;
+  pubTimeSnapshot: string | null;
+  categorySnapshot: string | null;
+  tagsJsonSnapshot: string | null;
+  snapshotQuality: "minimal" | "partial" | "complete";
+  lastHydratedAt: string | null;
   createdAt: string;
   updatedAt: string;
 };

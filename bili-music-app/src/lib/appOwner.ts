@@ -9,6 +9,9 @@ export const APP_OWNER_NAME_COOKIE = "bili_music_owner_name";
 const LOCAL_OWNER_ID = "local";
 
 export async function currentAppOwnerId(): Promise<string> {
+  if (process.env.APP_SINGLE_USER_MODE !== "0") {
+    return normalizeSingleOwnerId(process.env.APP_OWNER_ID || process.env.KERNEL_EXTERNAL_OWNER_ID || LOCAL_OWNER_ID);
+  }
   try {
     const store = await cookies();
     return normalizeAppOwnerId(store.get(APP_OWNER_COOKIE)?.value);
@@ -25,6 +28,14 @@ export function appOwnerIdFromBiliUid(biliUid: unknown): string {
 export function normalizeAppOwnerId(value: unknown): string {
   const text = sanitizeText(value, 128);
   if (/^bili:\d{1,24}$/.test(text)) {
+    return text;
+  }
+  return LOCAL_OWNER_ID;
+}
+
+function normalizeSingleOwnerId(value: unknown): string {
+  const text = sanitizeText(value, 128);
+  if (/^[A-Za-z0-9_.:@-]{1,128}$/.test(text)) {
     return text;
   }
   return LOCAL_OWNER_ID;

@@ -99,13 +99,25 @@ function migrate(db: DatabaseSync): void {
     CREATE TABLE IF NOT EXISTS favorite_videos (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       external_owner_id TEXT NOT NULL DEFAULT 'local',
-      candidate_id INTEGER NOT NULL,
+      candidate_id INTEGER,
+      bvid TEXT NOT NULL,
       note TEXT,
       mood TEXT,
+      title_snapshot TEXT NOT NULL,
+      source_url_snapshot TEXT NOT NULL,
+      creator_mid_snapshot TEXT,
+      creator_name_snapshot TEXT,
+      cover_url_snapshot TEXT,
+      duration_seconds_snapshot INTEGER,
+      pub_time_snapshot TEXT,
+      category_snapshot TEXT,
+      tags_json_snapshot TEXT,
+      snapshot_quality TEXT NOT NULL DEFAULT 'minimal',
+      last_hydrated_at TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
-      UNIQUE(external_owner_id, candidate_id),
-      FOREIGN KEY(candidate_id) REFERENCES candidate_videos(id) ON DELETE CASCADE
+      UNIQUE(external_owner_id, bvid),
+      FOREIGN KEY(candidate_id) REFERENCES candidate_videos(id) ON DELETE SET NULL
     );
 
     CREATE TABLE IF NOT EXISTS tracks (
@@ -132,13 +144,15 @@ function migrate(db: DatabaseSync): void {
     CREATE INDEX IF NOT EXISTS idx_candidate_creator_mid ON candidate_videos(creator_mid);
     CREATE INDEX IF NOT EXISTS idx_candidate_final_score ON candidate_videos(final_score);
     CREATE INDEX IF NOT EXISTS idx_interactions_candidate ON candidate_interactions(candidate_id);
-    CREATE INDEX IF NOT EXISTS idx_interactions_owner_candidate ON candidate_interactions(external_owner_id, candidate_id);
     CREATE INDEX IF NOT EXISTS idx_favorite_owner ON favorite_videos(external_owner_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_favorite_candidate ON favorite_videos(candidate_id);
     CREATE INDEX IF NOT EXISTS idx_tracks_candidate ON tracks(candidate_id);
     CREATE INDEX IF NOT EXISTS idx_tracks_status ON tracks(status);
   `);
   ensureColumn(db, "candidate_interactions", "external_owner_id", "TEXT NOT NULL DEFAULT 'local'");
+  migrateFavoriteVideosToStableBvid(db);
+  db.exec("CREATE INDEX IF NOT EXISTS idx_interactions_owner_candidate ON candidate_interactions(external_owner_id, candidate_id);");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_favorite_owner_bvid ON favorite_videos(external_owner_id, bvid);");
 }
 
 export function nowIso(): string {
@@ -352,7 +366,7 @@ export function searchFavoriteCandidates(keyword: string, limit: number, externa
   const rows = getDatabase()
     .prepare(
       `SELECT candidate_videos.* FROM candidate_videos
-       INNER JOIN favorite_videos ON favorite_videos.candidate_id = candidate_videos.id
+       INNER JOIN favorite_videos ON favorite_videos.bvid = candidate_videos.bvid
        WHERE favorite_videos.external_owner_id = ?
          AND candidate_videos.source_provider <> 'mock'
          AND (? = '%%' OR candidate_videos.title LIKE ? OR candidate_videos.description LIKE ? OR candidate_videos.tags_json LIKE ?)
@@ -380,6 +394,30 @@ export function getCandidateById(id: number): CandidateVideo | null {
   return row ? mapCandidateVideo(row) : null;
 }
 
+export function getCandidateByBvid(bvid: string): CandidateVideo | null {
+  const row = getDatabase().prepare("SELECT * FROM candidate_videos WHERE bvid=?").get(bvid);
+  return row ? mapCandidateVideo(row) : null;
+}
+
+export function getOrHydrateFavoriteCandidateByBvid(bvid: string, externalOwnerId = "local"): CandidateVideo | null {
+  const existing = getCandidateByBvid(bvid);
+  if (existing) {
+    return existing;
+  }
+  const row = getDatabase()
+    .prepare("SELECT * FROM favorite_videos WHERE external_owner_id=? AND bvid=?")
+    .get(externalOwnerId, bvid);
+  if (!row) {
+    return null;
+  }
+  const favorite = mapFavoriteVideo(row);
+  const candidate = hydrateCandidateFromFavorite(favorite);
+  getDatabase()
+    .prepare("UPDATE favorite_videos SET candidate_id=?, last_hydrated_at=?, updated_at=? WHERE id=?")
+    .run(candidate.id, nowIso(), nowIso(), favorite.id);
+  return candidate;
+}
+
 export function listCandidates(limit: number): CandidateVideo[] {
   const rows = getDatabase()
     .prepare("SELECT * FROM candidate_videos WHERE source_provider <> 'mock' ORDER BY updated_at DESC LIMIT ?")
@@ -391,29 +429,72 @@ export function createFavoriteVideo(
   candidateId: number,
   input: { externalOwnerId?: string; note?: string | null; mood?: string | null } = {}
 ): FavoriteVideo {
+  const candidate = getCandidateById(candidateId);
+  if (!candidate) {
+    throw new Error("candidate not found");
+  }
   const now = nowIso();
   const externalOwnerId = input.externalOwnerId || "local";
   getDatabase()
     .prepare(
       `INSERT INTO favorite_videos (
-        external_owner_id, candidate_id, note, mood, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(external_owner_id, candidate_id) DO UPDATE SET
+        external_owner_id, candidate_id, bvid, note, mood,
+        title_snapshot, source_url_snapshot, creator_mid_snapshot, creator_name_snapshot,
+        cover_url_snapshot, duration_seconds_snapshot, pub_time_snapshot, category_snapshot,
+        tags_json_snapshot, snapshot_quality, last_hydrated_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(external_owner_id, bvid) DO UPDATE SET
+        candidate_id=excluded.candidate_id,
         note=excluded.note,
         mood=excluded.mood,
+        title_snapshot=excluded.title_snapshot,
+        source_url_snapshot=excluded.source_url_snapshot,
+        creator_mid_snapshot=COALESCE(excluded.creator_mid_snapshot, favorite_videos.creator_mid_snapshot),
+        creator_name_snapshot=COALESCE(excluded.creator_name_snapshot, favorite_videos.creator_name_snapshot),
+        cover_url_snapshot=COALESCE(excluded.cover_url_snapshot, favorite_videos.cover_url_snapshot),
+        duration_seconds_snapshot=COALESCE(excluded.duration_seconds_snapshot, favorite_videos.duration_seconds_snapshot),
+        pub_time_snapshot=COALESCE(excluded.pub_time_snapshot, favorite_videos.pub_time_snapshot),
+        category_snapshot=COALESCE(excluded.category_snapshot, favorite_videos.category_snapshot),
+        tags_json_snapshot=COALESCE(excluded.tags_json_snapshot, favorite_videos.tags_json_snapshot),
+        snapshot_quality=excluded.snapshot_quality,
+        last_hydrated_at=excluded.last_hydrated_at,
         updated_at=excluded.updated_at`
     )
-    .run(externalOwnerId, candidateId, input.note ?? null, input.mood ?? null, now, now);
+    .run(
+      externalOwnerId,
+      candidate.id,
+      candidate.bvid,
+      input.note ?? null,
+      input.mood ?? null,
+      candidate.title,
+      candidate.sourceUrl,
+      candidate.creatorMid,
+      candidate.creatorName,
+      candidate.coverUrl,
+      candidate.durationSeconds,
+      candidate.pubTime,
+      candidate.category,
+      candidate.tagsJson,
+      favoriteSnapshotQuality(candidate),
+      now,
+      now,
+      now
+    );
   const row = getDatabase()
-    .prepare("SELECT * FROM favorite_videos WHERE external_owner_id=? AND candidate_id=?")
-    .get(externalOwnerId, candidateId);
+    .prepare("SELECT * FROM favorite_videos WHERE external_owner_id=? AND bvid=?")
+    .get(externalOwnerId, candidate.bvid);
   return mapFavoriteVideo(row);
 }
 
 export function deleteFavoriteVideo(candidateId: number, externalOwnerId = "local"): boolean {
-  const result = getDatabase()
-    .prepare("DELETE FROM favorite_videos WHERE candidate_id=? AND external_owner_id=?")
-    .run(candidateId, externalOwnerId);
+  const candidate = Number.isFinite(candidateId) ? getCandidateById(candidateId) : null;
+  const result = candidate
+    ? getDatabase()
+        .prepare("DELETE FROM favorite_videos WHERE external_owner_id=? AND (candidate_id=? OR bvid=?)")
+        .run(externalOwnerId, candidateId, candidate.bvid)
+    : getDatabase()
+        .prepare("DELETE FROM favorite_videos WHERE candidate_id=? AND external_owner_id=?")
+        .run(candidateId, externalOwnerId);
   return result.changes > 0;
 }
 
@@ -424,22 +505,34 @@ export function listFavoriteVideos(limit: number, externalOwnerId = "local"): Ar
         favorite_videos.id AS favorite_id,
         favorite_videos.external_owner_id AS favorite_external_owner_id,
         favorite_videos.candidate_id AS favorite_candidate_id,
+        favorite_videos.bvid AS favorite_bvid,
         favorite_videos.note AS favorite_note,
         favorite_videos.mood AS favorite_mood,
+        favorite_videos.title_snapshot AS favorite_title_snapshot,
+        favorite_videos.source_url_snapshot AS favorite_source_url_snapshot,
+        favorite_videos.creator_mid_snapshot AS favorite_creator_mid_snapshot,
+        favorite_videos.creator_name_snapshot AS favorite_creator_name_snapshot,
+        favorite_videos.cover_url_snapshot AS favorite_cover_url_snapshot,
+        favorite_videos.duration_seconds_snapshot AS favorite_duration_seconds_snapshot,
+        favorite_videos.pub_time_snapshot AS favorite_pub_time_snapshot,
+        favorite_videos.category_snapshot AS favorite_category_snapshot,
+        favorite_videos.tags_json_snapshot AS favorite_tags_json_snapshot,
+        favorite_videos.snapshot_quality AS favorite_snapshot_quality,
+        favorite_videos.last_hydrated_at AS favorite_last_hydrated_at,
         favorite_videos.created_at AS favorite_created_at,
         favorite_videos.updated_at AS favorite_updated_at,
         candidate_videos.*
        FROM favorite_videos
-       INNER JOIN candidate_videos ON candidate_videos.id = favorite_videos.candidate_id
+       LEFT JOIN candidate_videos ON candidate_videos.bvid = favorite_videos.bvid
        WHERE favorite_videos.external_owner_id = ?
-         AND candidate_videos.source_provider <> 'mock'
+         AND (candidate_videos.id IS NULL OR candidate_videos.source_provider <> 'mock')
        ORDER BY favorite_videos.created_at DESC
        LIMIT ?`
     )
     .all(externalOwnerId, limit);
   return rows.map((row) => ({
     favorite: mapFavoriteVideoFromJoin(row),
-    candidate: mapCandidateVideo(row)
+    candidate: mapCandidateVideoOrHydrateFavorite(row)
   }));
 }
 
@@ -455,6 +548,21 @@ export function favoriteCandidateIds(candidateIds: number[], externalOwnerId = "
     )
     .all(externalOwnerId, ...candidateIds);
   return new Set(rows.map((row) => Number(read(row, "candidate_id"))));
+}
+
+export function favoriteBvids(bvids: string[], externalOwnerId = "local"): Set<string> {
+  const values = Array.from(new Set(bvids.filter(Boolean)));
+  if (!values.length) {
+    return new Set();
+  }
+  const placeholders = values.map(() => "?").join(",");
+  const rows = getDatabase()
+    .prepare(
+      `SELECT bvid FROM favorite_videos
+       WHERE external_owner_id = ? AND bvid IN (${placeholders})`
+    )
+    .all(externalOwnerId, ...values);
+  return new Set(rows.map((row) => String(read(row, "bvid"))));
 }
 
 export function logSearchQuery(keyword: string, resultCount: number, remoteUsed: boolean): SearchQueryLog {
@@ -588,6 +696,17 @@ export function updateTrack(
   return updated;
 }
 
+export function markExpiredReadyTracks(): number {
+  const result = getDatabase()
+    .prepare(
+      `UPDATE tracks
+       SET status='expired', failure_reason='音频缓存已过期', updated_at=?
+       WHERE status='ready' AND expires_at IS NOT NULL AND datetime(expires_at) <= datetime('now')`
+    )
+    .run(nowIso());
+  return Number(result.changes);
+}
+
 export function interactionCounts(candidateIds: number[], externalOwnerId = "local"): Map<number, CandidateInteractionSummary> {
   const map = new Map<number, CandidateInteractionSummary>();
   if (!candidateIds.length) {
@@ -691,6 +810,56 @@ function mapCandidateVideo(row: unknown): CandidateVideo {
   };
 }
 
+function mapCandidateVideoOrHydrateFavorite(row: unknown): CandidateVideo {
+  if (read(row, "id") !== null) {
+    return mapCandidateVideo(row);
+  }
+  const favorite = mapFavoriteVideoFromJoin(row);
+  const candidate = hydrateCandidateFromFavorite(favorite);
+  getDatabase()
+    .prepare("UPDATE favorite_videos SET candidate_id=?, last_hydrated_at=?, updated_at=? WHERE id=?")
+    .run(candidate.id, nowIso(), nowIso(), favorite.id);
+  return candidate;
+}
+
+function hydrateCandidateFromFavorite(favorite: FavoriteVideo): CandidateVideo {
+  return upsertCandidateVideo({
+    bvid: favorite.bvid,
+    aid: null,
+    title: favorite.titleSnapshot || favorite.bvid,
+    description: null,
+    creatorMid: favorite.creatorMidSnapshot,
+    creatorName: favorite.creatorNameSnapshot,
+    coverUrl: favorite.coverUrlSnapshot,
+    durationSeconds: favorite.durationSecondsSnapshot,
+    pubTime: favorite.pubTimeSnapshot,
+    sourceUrl: favorite.sourceUrlSnapshot || canonicalBilibiliUrl(favorite.bvid),
+    category: favorite.categorySnapshot,
+    tagsJson: favorite.tagsJsonSnapshot || "[]",
+    searchKeyword: null,
+    sourceProvider: "favorite_snapshot",
+    musicLikelihoodScore: 0,
+    preferredCreatorBoost: 0,
+    finalScore: 0,
+    scoreBreakdownJson: "{}",
+    lastSeenAt: nowIso()
+  });
+}
+
+function canonicalBilibiliUrl(bvid: string): string {
+  return `https://www.bilibili.com/video/${bvid}`;
+}
+
+function favoriteSnapshotQuality(candidate: CandidateVideo): FavoriteVideo["snapshotQuality"] {
+  if (candidate.creatorMid && candidate.creatorName && candidate.durationSeconds && candidate.sourceUrl) {
+    return "complete";
+  }
+  if (candidate.title && candidate.sourceUrl) {
+    return "partial";
+  }
+  return "minimal";
+}
+
 function mapCandidateInteraction(row: unknown): CandidateInteraction {
   return {
     id: Number(read(row, "id")),
@@ -709,13 +878,131 @@ function ensureColumn(db: DatabaseSync, table: string, column: string, definitio
   }
 }
 
+function migrateFavoriteVideosToStableBvid(db: DatabaseSync): void {
+  const columns = db.prepare("PRAGMA table_info(favorite_videos)").all();
+  const names = new Set(columns.map((row) => String(read(row, "name"))));
+  const candidateIdColumn = columns.find((row) => String(read(row, "name")) === "candidate_id");
+  const requiredColumns = [
+    "bvid",
+    "title_snapshot",
+    "source_url_snapshot",
+    "creator_mid_snapshot",
+    "creator_name_snapshot",
+    "cover_url_snapshot",
+    "duration_seconds_snapshot",
+    "pub_time_snapshot",
+    "category_snapshot",
+    "tags_json_snapshot",
+    "snapshot_quality",
+    "last_hydrated_at"
+  ];
+  const missingRequiredColumn = requiredColumns.some((column) => !names.has(column));
+  const candidateIdIsRequired = Number(read(candidateIdColumn, "notnull")) === 1;
+  if (!missingRequiredColumn && !candidateIdIsRequired) {
+    return;
+  }
+
+  const legacyTable = `favorite_videos_legacy_${Date.now()}`;
+  db.exec(`
+    DROP INDEX IF EXISTS idx_favorite_owner;
+    DROP INDEX IF EXISTS idx_favorite_candidate;
+    DROP INDEX IF EXISTS idx_favorite_owner_bvid;
+    ALTER TABLE favorite_videos RENAME TO ${legacyTable};
+  `);
+  createFavoriteVideosTable(db);
+
+  const bvidExpr = names.has("bvid") ? `COALESCE(old.bvid, c.bvid)` : "c.bvid";
+  const snapshotExpr = (column: string, fallback: string) => (names.has(column) ? `COALESCE(old.${column}, ${fallback})` : fallback);
+  const titleExpr = snapshotExpr("title_snapshot", `COALESCE(c.title, ${bvidExpr})`);
+  const sourceUrlExpr = snapshotExpr("source_url_snapshot", `COALESCE(c.source_url, 'https://www.bilibili.com/video/' || ${bvidExpr})`);
+  const snapshotQualityExpr = names.has("snapshot_quality")
+    ? "COALESCE(old.snapshot_quality, CASE WHEN c.creator_name IS NOT NULL AND c.creator_mid IS NOT NULL THEN 'complete' WHEN c.id IS NOT NULL THEN 'partial' ELSE 'minimal' END)"
+    : "CASE WHEN c.creator_name IS NOT NULL AND c.creator_mid IS NOT NULL THEN 'complete' WHEN c.id IS NOT NULL THEN 'partial' ELSE 'minimal' END";
+  const lastHydratedExpr = names.has("last_hydrated_at")
+    ? "COALESCE(old.last_hydrated_at, c.updated_at, old.updated_at)"
+    : "COALESCE(c.updated_at, old.updated_at)";
+
+  db.exec(`
+    INSERT OR IGNORE INTO favorite_videos (
+      external_owner_id, candidate_id, bvid, note, mood,
+      title_snapshot, source_url_snapshot, creator_mid_snapshot, creator_name_snapshot,
+      cover_url_snapshot, duration_seconds_snapshot, pub_time_snapshot, category_snapshot,
+      tags_json_snapshot, snapshot_quality, last_hydrated_at, created_at, updated_at
+    )
+    SELECT
+      COALESCE(old.external_owner_id, 'local'),
+      c.id,
+      ${bvidExpr},
+      old.note,
+      old.mood,
+      ${titleExpr},
+      ${sourceUrlExpr},
+      ${snapshotExpr("creator_mid_snapshot", "c.creator_mid")},
+      ${snapshotExpr("creator_name_snapshot", "c.creator_name")},
+      ${snapshotExpr("cover_url_snapshot", "c.cover_url")},
+      ${snapshotExpr("duration_seconds_snapshot", "c.duration_seconds")},
+      ${snapshotExpr("pub_time_snapshot", "c.pub_time")},
+      ${snapshotExpr("category_snapshot", "c.category")},
+      ${snapshotExpr("tags_json_snapshot", "c.tags_json")},
+      ${snapshotQualityExpr},
+      ${lastHydratedExpr},
+      old.created_at,
+      old.updated_at
+    FROM ${legacyTable} old
+    LEFT JOIN candidate_videos c ON c.id = old.candidate_id
+    WHERE ${bvidExpr} IS NOT NULL AND ${bvidExpr} <> '';
+
+    DROP TABLE ${legacyTable};
+  `);
+}
+
+function createFavoriteVideosTable(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS favorite_videos (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      external_owner_id TEXT NOT NULL DEFAULT 'local',
+      candidate_id INTEGER,
+      bvid TEXT NOT NULL,
+      note TEXT,
+      mood TEXT,
+      title_snapshot TEXT NOT NULL,
+      source_url_snapshot TEXT NOT NULL,
+      creator_mid_snapshot TEXT,
+      creator_name_snapshot TEXT,
+      cover_url_snapshot TEXT,
+      duration_seconds_snapshot INTEGER,
+      pub_time_snapshot TEXT,
+      category_snapshot TEXT,
+      tags_json_snapshot TEXT,
+      snapshot_quality TEXT NOT NULL DEFAULT 'minimal',
+      last_hydrated_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(external_owner_id, bvid),
+      FOREIGN KEY(candidate_id) REFERENCES candidate_videos(id) ON DELETE SET NULL
+    );
+  `);
+}
+
 function mapFavoriteVideo(row: unknown): FavoriteVideo {
   return {
     id: Number(read(row, "id")),
     externalOwnerId: String(read(row, "external_owner_id")),
-    candidateId: Number(read(row, "candidate_id")),
+    candidateId: nullableNumber(read(row, "candidate_id")),
+    bvid: String(read(row, "bvid")),
     note: nullableString(read(row, "note")),
     mood: nullableString(read(row, "mood")),
+    titleSnapshot: String(read(row, "title_snapshot")),
+    sourceUrlSnapshot: String(read(row, "source_url_snapshot")),
+    creatorMidSnapshot: nullableString(read(row, "creator_mid_snapshot")),
+    creatorNameSnapshot: nullableString(read(row, "creator_name_snapshot")),
+    coverUrlSnapshot: nullableString(read(row, "cover_url_snapshot")),
+    durationSecondsSnapshot: nullableNumber(read(row, "duration_seconds_snapshot")),
+    pubTimeSnapshot: nullableString(read(row, "pub_time_snapshot")),
+    categorySnapshot: nullableString(read(row, "category_snapshot")),
+    tagsJsonSnapshot: nullableString(read(row, "tags_json_snapshot")),
+    snapshotQuality: normalizeSnapshotQuality(read(row, "snapshot_quality")),
+    lastHydratedAt: nullableString(read(row, "last_hydrated_at")),
     createdAt: String(read(row, "created_at")),
     updatedAt: String(read(row, "updated_at"))
   };
@@ -725,9 +1012,21 @@ function mapFavoriteVideoFromJoin(row: unknown): FavoriteVideo {
   return {
     id: Number(read(row, "favorite_id")),
     externalOwnerId: String(read(row, "favorite_external_owner_id")),
-    candidateId: Number(read(row, "favorite_candidate_id")),
+    candidateId: nullableNumber(read(row, "favorite_candidate_id")),
+    bvid: String(read(row, "favorite_bvid")),
     note: nullableString(read(row, "favorite_note")),
     mood: nullableString(read(row, "favorite_mood")),
+    titleSnapshot: String(read(row, "favorite_title_snapshot")),
+    sourceUrlSnapshot: String(read(row, "favorite_source_url_snapshot")),
+    creatorMidSnapshot: nullableString(read(row, "favorite_creator_mid_snapshot")),
+    creatorNameSnapshot: nullableString(read(row, "favorite_creator_name_snapshot")),
+    coverUrlSnapshot: nullableString(read(row, "favorite_cover_url_snapshot")),
+    durationSecondsSnapshot: nullableNumber(read(row, "favorite_duration_seconds_snapshot")),
+    pubTimeSnapshot: nullableString(read(row, "favorite_pub_time_snapshot")),
+    categorySnapshot: nullableString(read(row, "favorite_category_snapshot")),
+    tagsJsonSnapshot: nullableString(read(row, "favorite_tags_json_snapshot")),
+    snapshotQuality: normalizeSnapshotQuality(read(row, "favorite_snapshot_quality")),
+    lastHydratedAt: nullableString(read(row, "favorite_last_hydrated_at")),
     createdAt: String(read(row, "favorite_created_at")),
     updatedAt: String(read(row, "favorite_updated_at"))
   };
@@ -755,6 +1054,9 @@ function mapTrack(row: unknown): Track {
 }
 
 function read(row: unknown, key: string): SqlValue {
+  if (!row) {
+    return null;
+  }
   const record = row as Record<string, SqlValue>;
   return record[key] ?? null;
 }
@@ -772,4 +1074,8 @@ function nullableNumber(value: SqlValue): number | null {
   }
   const num = Number(value);
   return Number.isFinite(num) ? num : null;
+}
+
+function normalizeSnapshotQuality(value: SqlValue): FavoriteVideo["snapshotQuality"] {
+  return value === "complete" || value === "partial" ? value : "minimal";
 }

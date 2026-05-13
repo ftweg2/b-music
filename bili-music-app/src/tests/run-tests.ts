@@ -5,9 +5,11 @@ import path from "node:path";
 import {
   closeDatabaseForTests,
   createOrReuseTrack,
+  favoriteBvids,
   createFavoriteVideo,
   createPreferredCreator,
   favoriteCandidateIds,
+  getDatabase,
   getTrackByCandidateId,
   listFavoriteVideos,
   resetDatabaseForTests,
@@ -214,6 +216,40 @@ const tests: TestCase[] = [
       assert.equal(favorite.candidateId, candidate.id);
       assert.equal(favoriteCandidateIds([candidate.id]).has(candidate.id), true);
       assert.equal(listFavoriteVideos(10).length, 1);
+      closeDatabaseForTests();
+    }
+  },
+  {
+    name: "favorite survives candidate cache deletion by bvid snapshot",
+    run: () => {
+      useTempDatabase("favorite-bvid");
+      const candidate = upsertCandidateVideo({
+        bvid: "BV1mockfav02",
+        aid: null,
+        title: "Durable favorite candidate",
+        description: null,
+        creatorMid: "555555",
+        creatorName: "Durable UP",
+        coverUrl: null,
+        durationSeconds: 180,
+        pubTime: null,
+        sourceUrl: "https://www.bilibili.com/video/BV1mockfav02",
+        category: "music",
+        tagsJson: "[]",
+        searchKeyword: "favorite",
+        sourceProvider: "test",
+        musicLikelihoodScore: 10,
+        preferredCreatorBoost: 0,
+        finalScore: 20,
+        scoreBreakdownJson: "{}"
+      });
+      createFavoriteVideo(candidate.id, { note: "keep" });
+      getDatabase().prepare("DELETE FROM candidate_videos WHERE id=?").run(candidate.id);
+      const rows = listFavoriteVideos(10);
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].candidate.bvid, candidate.bvid);
+      assert.equal(rows[0].candidate.title, "Durable favorite candidate");
+      assert.equal(favoriteBvids([candidate.bvid]).has(candidate.bvid), true);
       closeDatabaseForTests();
     }
   },

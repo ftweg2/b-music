@@ -12,7 +12,7 @@ The App and kernel have different security boundaries. The App must not store Co
 
 ## App Docs
 
-- `bili-music-app/src/docs/API_REFERENCE.md`: Web/Android API calls.
+- `bili-music-app/src/docs/API_USAGE.md`: Web/Android API calls and operational notes.
 - `bili-music-app/src/docs/CLOUD_DEPLOYMENT.md`: App + kernel cloud deployment guide.
 - `bili-music-app/src/docs/OPERATIONS_CHECKLIST.md`: quality and follow-up checklist.
 

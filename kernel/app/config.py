@@ -36,6 +36,7 @@ class Settings:
     request_timeout_seconds: float
     api_dash_download_concurrency: int
     api_dash_parallel_min_bytes: int
+    artifact_retention_hours: int
     login_session_timeout_seconds: int
     login_poll_interval_seconds: int
     login_qr_refresh_seconds: int
@@ -77,6 +78,7 @@ def get_settings() -> Settings:
             1024 * 1024,
             64 * 1024 * 1024,
         ),
+        artifact_retention_hours=_bounded_int_from_env("ARTIFACT_RETENTION_HOURS", 168, 1, 24 * 365),
         login_session_timeout_seconds=int(os.getenv("LOGIN_SESSION_TIMEOUT_SECONDS", "180")),
         login_poll_interval_seconds=int(os.getenv("LOGIN_POLL_INTERVAL_SECONDS", "3")),
         login_qr_refresh_seconds=int(os.getenv("LOGIN_QR_REFRESH_SECONDS", "60")),
