@@ -530,10 +530,14 @@ export function listFavoriteVideos(limit: number, externalOwnerId = "local"): Ar
        LIMIT ?`
     )
     .all(externalOwnerId, limit);
-  return rows.map((row) => ({
-    favorite: mapFavoriteVideoFromJoin(row),
-    candidate: mapCandidateVideoOrHydrateFavorite(row)
-  }));
+  return rows.map((row) => {
+    const favorite = mapFavoriteVideoFromJoin(row);
+    const candidate = mapCandidateVideoOrHydrateFavorite(row);
+    return {
+      favorite: syncFavoriteCandidateLink(favorite, candidate),
+      candidate
+    };
+  });
 }
 
 export function favoriteCandidateIds(candidateIds: number[], externalOwnerId = "local"): Set<number> {
@@ -815,11 +819,23 @@ function mapCandidateVideoOrHydrateFavorite(row: unknown): CandidateVideo {
     return mapCandidateVideo(row);
   }
   const favorite = mapFavoriteVideoFromJoin(row);
-  const candidate = hydrateCandidateFromFavorite(favorite);
+  return hydrateCandidateFromFavorite(favorite);
+}
+
+function syncFavoriteCandidateLink(favorite: FavoriteVideo, candidate: CandidateVideo): FavoriteVideo {
+  if (favorite.candidateId === candidate.id) {
+    return favorite;
+  }
+  const hydratedAt = nowIso();
   getDatabase()
     .prepare("UPDATE favorite_videos SET candidate_id=?, last_hydrated_at=?, updated_at=? WHERE id=?")
-    .run(candidate.id, nowIso(), nowIso(), favorite.id);
-  return candidate;
+    .run(candidate.id, hydratedAt, hydratedAt, favorite.id);
+  return {
+    ...favorite,
+    candidateId: candidate.id,
+    lastHydratedAt: hydratedAt,
+    updatedAt: hydratedAt
+  };
 }
 
 function hydrateCandidateFromFavorite(favorite: FavoriteVideo): CandidateVideo {

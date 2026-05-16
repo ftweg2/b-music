@@ -18,10 +18,15 @@ export async function GET() {
   const rows = listFavoriteVideos(100, ownerId);
   const candidates = rows.map((row) => row.candidate);
   const favorites = favoriteBvids(candidates.map((candidate) => candidate.bvid), ownerId);
+  const items = rows.map((row) => ({
+    favorite: row.favorite,
+    candidate: toCandidateWithScore(row.candidate, undefined, favorites.has(row.candidate.bvid))
+  }));
   return NextResponse.json({
     ownerId,
-    favorites: rows.map((row) => row.favorite),
-    candidates: candidates.map((candidate) => toCandidateWithScore(candidate, undefined, favorites.has(candidate.bvid)))
+    favorites: items.map((item) => item.favorite),
+    candidates: items.map((item) => item.candidate),
+    items
   });
 }
 
@@ -39,10 +44,15 @@ export async function POST(request: Request) {
       note: sanitizeNullableText(body.note, 500),
       mood: sanitizeNullableText(body.mood, 80)
     });
+    const candidateWithScore = toCandidateWithScore(candidate, undefined, true);
     return NextResponse.json(
       {
         favorite,
-        candidate: toCandidateWithScore(candidate, undefined, true)
+        candidate: candidateWithScore,
+        item: {
+          favorite,
+          candidate: candidateWithScore
+        }
       },
       { status: 201 }
     );

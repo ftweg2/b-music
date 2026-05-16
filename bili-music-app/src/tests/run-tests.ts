@@ -220,6 +220,39 @@ const tests: TestCase[] = [
     }
   },
   {
+    name: "favorite list repairs missing candidate id when candidate row still exists",
+    run: () => {
+      useTempDatabase("favorite-link");
+      const candidate = upsertCandidateVideo({
+        bvid: "BV1mockfav03",
+        aid: null,
+        title: "Linked favorite candidate",
+        description: null,
+        creatorMid: "666666",
+        creatorName: "Linked UP",
+        coverUrl: null,
+        durationSeconds: 200,
+        pubTime: null,
+        sourceUrl: "https://www.bilibili.com/video/BV1mockfav03",
+        category: "music",
+        tagsJson: "[]",
+        searchKeyword: "favorite",
+        sourceProvider: "test",
+        musicLikelihoodScore: 10,
+        preferredCreatorBoost: 0,
+        finalScore: 20,
+        scoreBreakdownJson: "{}"
+      });
+      const favorite = createFavoriteVideo(candidate.id, { note: "keep" });
+      getDatabase().prepare("UPDATE favorite_videos SET candidate_id=NULL WHERE id=?").run(favorite.id);
+      const rows = listFavoriteVideos(10);
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].favorite.candidateId, rows[0].candidate.id);
+      assert.equal(rows[0].candidate.id, candidate.id);
+      closeDatabaseForTests();
+    }
+  },
+  {
     name: "favorite survives candidate cache deletion by bvid snapshot",
     run: () => {
       useTempDatabase("favorite-bvid");
@@ -247,6 +280,7 @@ const tests: TestCase[] = [
       getDatabase().prepare("DELETE FROM candidate_videos WHERE id=?").run(candidate.id);
       const rows = listFavoriteVideos(10);
       assert.equal(rows.length, 1);
+      assert.equal(rows[0].favorite.candidateId, rows[0].candidate.id);
       assert.equal(rows[0].candidate.bvid, candidate.bvid);
       assert.equal(rows[0].candidate.title, "Durable favorite candidate");
       assert.equal(favoriteBvids([candidate.bvid]).has(candidate.bvid), true);
