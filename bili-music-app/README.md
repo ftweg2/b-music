@@ -76,6 +76,6 @@ Advanced playback features such as lyrics, equalizer, spectrum, offline cache, a
 
 ## Docs
 
-- `src/docs/API_REFERENCE.md`: Web and Android-facing App API reference.
+- `src/docs/API_USAGE.md`: Web and Android-facing App API usage reference.
 - `src/docs/CLOUD_DEPLOYMENT.md`: deployment guide for App + external kernel.
 - `src/docs/OPERATIONS_CHECKLIST.md`: current quality notes and follow-up checklist.
