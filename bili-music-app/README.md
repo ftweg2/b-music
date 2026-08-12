@@ -1,6 +1,6 @@
-# bili-music-app
+# B-Music App
 
-App-layer MVP for Bilibili music discovery.
+App layer for local-first Bilibili music discovery.
 
 This repository stores metadata-only `CandidateVideo` records, lets users build a local music library, follow preferred UP creators, ranks search results, and provides a small Chinese Web UI. It does not extract audio, download media, store cookies, run Playwright, or implement the extraction kernel.
 
@@ -21,9 +21,10 @@ Copy `.env.example` to `.env` when needed. The default provider is `bilibili`; t
 SEARCH_PROVIDER=bilibili
 DATABASE_PATH=./data/bili-music-app.sqlite
 KERNEL_BASE_URL=http://localhost:8000
+KERNEL_REQUEST_TIMEOUT_MS=15000
 KERNEL_EXTERNAL_OWNER_ID=local
-KERNEL_PROFILE_ID=
 TRACK_ARTIFACT_TTL_SECONDS=86400
+APP_OWNER_ID=local
 ```
 
 The UI can choose `Bilibili 普通搜索` or `内核登录态搜索` per search. Kernel search sends only `external_owner_id`, `profile_id`, keyword, and limit to the kernel HTTP API. Cookies stay inside the kernel-owned browser profile and are never returned to this app.
@@ -72,7 +73,7 @@ The App now keeps a metadata-only local music library:
 
 No Bilibili favorites are changed, and no media files are saved in the App.
 
-Advanced playback features such as lyrics, equalizer, spectrum, offline cache, and cross-device sync are intentionally out of scope for this MVP.
+Advanced playback features such as lyrics, equalizer, spectrum, offline cache, and cross-device sync are intentionally out of scope.
 
 ## Docs
 

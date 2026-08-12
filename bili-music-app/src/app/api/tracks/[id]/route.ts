@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { currentAppOwnerId } from "@/lib/appOwner";
 import { getSyncedTrack } from "@/lib/tracks";
 import { sanitizeText } from "@/lib/sanitize";
 
@@ -12,7 +13,7 @@ type Params = {
 export async function GET(_request: Request, { params }: Params) {
   try {
     const { id } = await params;
-    const track = await getSyncedTrack(Number(id));
+    const track = await getSyncedTrack(Number(id), await currentAppOwnerId());
     if (!track) {
       return NextResponse.json({ error: "Track 不存在" }, { status: 404 });
     }

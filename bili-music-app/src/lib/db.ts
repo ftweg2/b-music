@@ -26,6 +26,7 @@ export function getDatabase(): DatabaseSync {
   const dbPath = process.env.DATABASE_PATH || path.join(process.cwd(), "data", "bili-music-app.sqlite");
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   database = new DatabaseSync(dbPath);
+  database.exec("PRAGMA busy_timeout = 5000;");
   database.exec("PRAGMA journal_mode = WAL;");
   database.exec("PRAGMA foreign_keys = ON;");
   migrate(database);
@@ -122,7 +123,8 @@ function migrate(db: DatabaseSync): void {
 
     CREATE TABLE IF NOT EXISTS tracks (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      candidate_id INTEGER NOT NULL UNIQUE,
+      external_owner_id TEXT NOT NULL DEFAULT 'local',
+      candidate_id INTEGER NOT NULL,
       bvid TEXT NOT NULL,
       title TEXT NOT NULL,
       source_url TEXT NOT NULL,
@@ -137,6 +139,7 @@ function migrate(db: DatabaseSync): void {
       expires_at TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
+      UNIQUE(external_owner_id, candidate_id),
       FOREIGN KEY(candidate_id) REFERENCES candidate_videos(id) ON DELETE CASCADE
     );
 
@@ -151,8 +154,11 @@ function migrate(db: DatabaseSync): void {
   `);
   ensureColumn(db, "candidate_interactions", "external_owner_id", "TEXT NOT NULL DEFAULT 'local'");
   migrateFavoriteVideosToStableBvid(db);
+  migrateTracksToOwners(db);
   db.exec("CREATE INDEX IF NOT EXISTS idx_interactions_owner_candidate ON candidate_interactions(external_owner_id, candidate_id);");
   db.exec("CREATE INDEX IF NOT EXISTS idx_favorite_owner_bvid ON favorite_videos(external_owner_id, bvid);");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_tracks_candidate ON tracks(candidate_id);");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_tracks_status ON tracks(status);");
 }
 
 export function nowIso(): string {
@@ -614,36 +620,52 @@ export function listCandidateInteractions(candidateId: number, externalOwnerId =
   return rows.map(mapCandidateInteraction);
 }
 
-export function createOrReuseTrack(candidate: CandidateVideo): Track {
+export function createOrReuseTrack(candidate: CandidateVideo, externalOwnerId = "local"): Track {
   const now = nowIso();
   getDatabase()
     .prepare(
       `INSERT INTO tracks (
-        candidate_id, bvid, title, source_url, duration_seconds, status, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(candidate_id) DO UPDATE SET
+        external_owner_id, candidate_id, bvid, title, source_url, duration_seconds, status, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(external_owner_id, candidate_id) DO UPDATE SET
         bvid=excluded.bvid,
         title=excluded.title,
         source_url=excluded.source_url,
         duration_seconds=COALESCE(tracks.duration_seconds, excluded.duration_seconds),
         updated_at=excluded.updated_at`
     )
-    .run(candidate.id, candidate.bvid, candidate.title, candidate.sourceUrl, candidate.durationSeconds, "pending", now, now);
-  const track = getTrackByCandidateId(candidate.id);
+    .run(externalOwnerId, candidate.id, candidate.bvid, candidate.title, candidate.sourceUrl, candidate.durationSeconds, "pending", now, now);
+  const track = getTrackByCandidateId(candidate.id, externalOwnerId);
   if (!track) {
     throw new Error("track upsert failed");
   }
   return track;
 }
 
-export function getTrackByCandidateId(candidateId: number): Track | null {
-  const row = getDatabase().prepare("SELECT * FROM tracks WHERE candidate_id=?").get(candidateId);
+export function getTrackByCandidateId(candidateId: number, externalOwnerId = "local"): Track | null {
+  const row = getDatabase()
+    .prepare("SELECT * FROM tracks WHERE candidate_id=? AND external_owner_id=?")
+    .get(candidateId, externalOwnerId);
   return row ? mapTrack(row) : null;
 }
 
-export function getTrackById(id: number): Track | null {
-  const row = getDatabase().prepare("SELECT * FROM tracks WHERE id=?").get(id);
+export function getTrackById(id: number, externalOwnerId = "local"): Track | null {
+  const row = getDatabase().prepare("SELECT * FROM tracks WHERE id=? AND external_owner_id=?").get(id, externalOwnerId);
   return row ? mapTrack(row) : null;
+}
+
+export function claimTrackPreparation(id: number, jobId: string, externalOwnerId = "local"): Track | null {
+  const result = getDatabase()
+    .prepare(
+      `UPDATE tracks
+       SET kernel_job_id=?, artifact_name=NULL, artifact_sha256=NULL,
+           artifact_size_bytes=NULL, artifact_mime_type=NULL, status='preparing',
+           failure_reason=NULL, expires_at=NULL, updated_at=?
+       WHERE id=? AND external_owner_id=?
+         AND NOT (status='preparing' AND kernel_job_id IS NOT NULL)`
+    )
+    .run(jobId, nowIso(), id, externalOwnerId);
+  return result.changes === 1 ? getTrackById(id, externalOwnerId) : null;
 }
 
 export function updateTrack(
@@ -661,9 +683,10 @@ export function updateTrack(
       | "failureReason"
       | "expiresAt"
     >
-  >
+  >,
+  externalOwnerId = "local"
 ): Track {
-  const current = getTrackById(id);
+  const current = getTrackById(id, externalOwnerId);
   if (!current) {
     throw new Error("track not found");
   }
@@ -678,7 +701,7 @@ export function updateTrack(
        SET kernel_job_id=?, artifact_name=?, artifact_sha256=?, artifact_size_bytes=?,
            artifact_mime_type=?, duration_seconds=?, status=?, failure_reason=?,
            expires_at=?, updated_at=?
-       WHERE id=?`
+        WHERE id=? AND external_owner_id=?`
     )
     .run(
       next.kernelJobId,
@@ -691,9 +714,10 @@ export function updateTrack(
       next.failureReason,
       next.expiresAt,
       next.updatedAt,
-      id
+      id,
+      externalOwnerId
     );
-  const updated = getTrackById(id);
+  const updated = getTrackById(id, externalOwnerId);
   if (!updated) {
     throw new Error("track not found after update");
   }
@@ -1000,6 +1024,81 @@ function createFavoriteVideosTable(db: DatabaseSync): void {
   `);
 }
 
+function migrateTracksToOwners(db: DatabaseSync): void {
+  const columns = db.prepare("PRAGMA table_info(tracks)").all();
+  const names = new Set(columns.map((row) => String(read(row, "name"))));
+  const uniqueIndexes = db
+    .prepare("PRAGMA index_list(tracks)")
+    .all()
+    .filter((row) => Number(read(row, "unique")) === 1)
+    .map((row) => {
+      const indexName = String(read(row, "name"));
+      return db
+        .prepare("SELECT name FROM pragma_index_info(?) ORDER BY seqno")
+        .all(indexName)
+        .map((column) => String(read(column, "name")));
+    });
+  const hasOwnerCandidateUnique = uniqueIndexes.some(
+    (index) => index.length === 2 && index[0] === "external_owner_id" && index[1] === "candidate_id"
+  );
+  const hasCandidateOnlyUnique = uniqueIndexes.some(
+    (index) => index.length === 1 && index[0] === "candidate_id"
+  );
+  if (names.has("external_owner_id") && hasOwnerCandidateUnique && !hasCandidateOnlyUnique) {
+    return;
+  }
+
+  const legacyTable = `tracks_legacy_${Date.now()}`;
+  db.exec(`
+    DROP INDEX IF EXISTS idx_tracks_candidate;
+    DROP INDEX IF EXISTS idx_tracks_status;
+    ALTER TABLE tracks RENAME TO ${legacyTable};
+  `);
+  createTracksTable(db);
+  const ownerExpr = names.has("external_owner_id") ? "COALESCE(old.external_owner_id, 'local')" : "'local'";
+  db.exec(`
+    INSERT INTO tracks (
+      id, external_owner_id, candidate_id, bvid, title, source_url, kernel_job_id,
+      artifact_name, artifact_sha256, artifact_size_bytes, artifact_mime_type,
+      duration_seconds, status, failure_reason, expires_at, created_at, updated_at
+    )
+    SELECT
+      old.id, ${ownerExpr}, old.candidate_id, old.bvid, old.title, old.source_url,
+      old.kernel_job_id, old.artifact_name, old.artifact_sha256, old.artifact_size_bytes,
+      old.artifact_mime_type, old.duration_seconds, old.status, old.failure_reason,
+      old.expires_at, old.created_at, old.updated_at
+    FROM ${legacyTable} old;
+
+    DROP TABLE ${legacyTable};
+  `);
+}
+
+function createTracksTable(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS tracks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      external_owner_id TEXT NOT NULL DEFAULT 'local',
+      candidate_id INTEGER NOT NULL,
+      bvid TEXT NOT NULL,
+      title TEXT NOT NULL,
+      source_url TEXT NOT NULL,
+      kernel_job_id TEXT,
+      artifact_name TEXT,
+      artifact_sha256 TEXT,
+      artifact_size_bytes INTEGER,
+      artifact_mime_type TEXT,
+      duration_seconds INTEGER,
+      status TEXT NOT NULL DEFAULT 'pending',
+      failure_reason TEXT,
+      expires_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(external_owner_id, candidate_id),
+      FOREIGN KEY(candidate_id) REFERENCES candidate_videos(id) ON DELETE CASCADE
+    );
+  `);
+}
+
 function mapFavoriteVideo(row: unknown): FavoriteVideo {
   return {
     id: Number(read(row, "id")),
@@ -1051,6 +1150,7 @@ function mapFavoriteVideoFromJoin(row: unknown): FavoriteVideo {
 function mapTrack(row: unknown): Track {
   return {
     id: Number(read(row, "id")),
+    externalOwnerId: String(read(row, "external_owner_id") ?? "local"),
     candidateId: Number(read(row, "candidate_id")),
     bvid: String(read(row, "bvid")),
     title: String(read(row, "title")),

@@ -11,6 +11,7 @@ type BilibiliSearchPayload = {
 
 export const bilibiliProvider: SearchProvider = {
   name: "bilibili",
+  supportsConcurrentSearch: true,
   async searchVideos(keyword: string, options: SearchOptions): Promise<RawSearchResult[]> {
     assertRateLimit("bilibili-search", 6, 60_000);
     const limit = Math.min(options.limit, Number(process.env.BILIBILI_SEARCH_LIMIT || 20), 20);

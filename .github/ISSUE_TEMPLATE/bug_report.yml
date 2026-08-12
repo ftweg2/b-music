@@ -1,0 +1,52 @@
+name: Bug report
+description: Report a reproducible B-Music problem
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include cookies, storage state, signed URLs, profile data, credentials, or extracted media. Report security issues privately through SECURITY.md.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - App
+        - Kernel
+        - Docker / deployment
+        - Documentation
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Use synthetic or non-sensitive values only.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: v1.0.0 or commit SHA
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Docker, Node.js, browser, and Python versions as relevant.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed cookies, credentials, tokens, signed URLs, profile data, and media from this report.
+          required: true

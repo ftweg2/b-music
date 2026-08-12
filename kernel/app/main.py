@@ -12,7 +12,7 @@ from app.schemas import HealthResponse
 
 app = FastAPI(
     title="bili-ctf-audio-kernel",
-    version="0.1.0",
+    version="1.0.0",
     description="Kernel-only authorized Bilibili CTF audio extraction service.",
 )
 
@@ -32,6 +32,16 @@ def startup() -> None:
     init_db(settings)
     recover_interrupted_runtime(settings)
     cleanup_old_artifacts(settings)
+
+
+@app.get("/")
+def service_info() -> dict[str, str]:
+    return {
+        "service": "bili-ctf-audio-kernel",
+        "status": "ok",
+        "health": "/health",
+        "docs": "/docs",
+    }
 
 
 @app.get("/health", response_model=HealthResponse)

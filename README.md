@@ -1,76 +1,116 @@
-# bili-ctf-audio-kernel
+# B-Music
 
-Workspace for the current Bilibili music MVP experiments.
+[![CI](https://github.com/ftweg2/b-music/actions/workflows/ci.yml/badge.svg)](https://github.com/ftweg2/b-music/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/badge/release-1.0.0-7c3aed.svg)](CHANGELOG.md)
 
-Current folders:
+B-Music is a local-first Bilibili music discovery app with a separate, Dockerized audio kernel. It helps a trusted local user search and rank music-like videos, keep a metadata-only library, and prepare original audio from authorized CTF material or videos the user can normally access.
 
-- `kernel/`: Dockerized extraction kernel for authorized Bilibili CTF/user-owned videos.
-- `bili-music-app/`: Next.js App layer for search, favorites, followed UP creators, Track metadata, and playback stream proxy.
-- `tests/`: external acceptance tools for the kernel.
+B-Music 是一个本地优先的 Bilibili 音乐发现项目。Web App 负责搜索、排序、收藏和播放体验；Docker 内核负责登录态与授权音频处理，二者通过 HTTP API 隔离。
 
-The App and kernel have different security boundaries. The App must not store Cookie, browser state, signed media URLs, or audio/video files. The kernel owns Bilibili login state and extraction artifacts.
+## Highlights
 
-## App Docs
+- Chinese Next.js interface for search, followed creators, favorites, queues, and streaming playback.
+- Explicit ranking with text relevance, creator preference, music likelihood, recency, and interaction signals.
+- Metadata-only App storage: no audio/video files, cookies, browser profiles, or signed media URLs.
+- Dockerized FastAPI kernel with `api_dash`, `browser_network`, and `mse_sourcebuffer` strategies.
+- Kernel-owned Bilibili login state with QR login and user-supplied cookie/storage-state import.
+- Raw artifact preservation, SHA-256 checksums, strategy reports, and sanitized errors.
+- Bounded, user-triggered search and sequential extraction strategies.
 
-- `bili-music-app/src/docs/API_USAGE.md`: Web/Android API calls and operational notes.
-- `bili-music-app/src/docs/CLOUD_DEPLOYMENT.md`: App + kernel cloud deployment guide.
-- `bili-music-app/src/docs/OPERATIONS_CHECKLIST.md`: quality and follow-up checklist.
+## Architecture
 
-## Kernel Notes
+```text
+Browser
+   │
+   ▼
+Next.js App (:3000) ── metadata ──► SQLite
+   │
+   │ HTTP API only
+   ▼
+FastAPI Kernel (:8000, Docker) ───► profiles + artifacts
+```
 
-The extraction kernel runtime service lives in `kernel/`. It is still separate from the App layer and must not grow a backend, frontend product, user system, or platform layer inside `kernel/`.
+The App and kernel intentionally have different trust boundaries. The App never reads kernel SQLite, profile files, or artifact storage directly.
 
-## Layout
+## Requirements
 
-- `kernel/`: Dockerized FastAPI extraction kernel, docs, tests, local storage placeholder.
-- `tests/webui/`: manual acceptance WebUI that calls the kernel HTTP API with `fetch`.
-- `tests/api_smoke/`: small API client scripts for smoke testing.
+- Docker Engine with Docker Compose v2
+- Node.js 22 or later
+- npm 10 or later
 
-The WebUI and smoke scripts are external test tools. They must not import kernel internals, read SQLite, read `kernel/storage`, or access browser profile files.
+Python 3.12 is only required when running kernel tests outside Docker.
 
-## Run Kernel
+## Quick start
+
+Start the kernel:
 
 ```bash
 cd kernel
+docker compose up --build -d
+```
+
+The safe default publishes the kernel on `127.0.0.1:8000`. Copy `kernel/.env.example` to `kernel/.env` only when you need to customize it.
+
+Start the App in another terminal:
+
+```bash
+cd bili-music-app
 cp .env.example .env
-docker compose up --build
+npm ci
+npm run dev
 ```
 
-Default base URL: `http://localhost:8000`
+On Windows PowerShell, use `Copy-Item .env.example .env` instead of `cp`.
 
-Health:
+Open [http://127.0.0.1:3000](http://127.0.0.1:3000). Kernel health is available at [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health), and its OpenAPI UI is at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
+
+## Configuration
+
+The checked-in examples are safe local defaults:
+
+- [`kernel/.env.example`](kernel/.env.example)
+- [`bili-music-app/.env.example`](bili-music-app/.env.example)
+
+Runtime `.env` files, SQLite databases, browser profiles, imported session state, and media artifacts are ignored by Git. The project is designed for one trusted local operator; it is not an internet-facing multi-tenant service.
+
+## Verification
 
 ```bash
-curl http://localhost:8000/health
+cd kernel
+python -m pytest app/tests
+
+cd ../bili-music-app
+npm test
+npm run typecheck
+npm run build
 ```
 
-The Docker image defaults Playwright to the `chrome` channel for media codec compatibility. `mse_sourcebuffer` depends on normal browser MSE playback, and Bilibili DASH audio commonly uses AAC/MP4 codecs that bundled open-source Chromium may not advertise. Tune `MSE_CAPTURE_MS` and `MSE_PLAYBACK_RATE` if you force MSE on longer videos.
-
-## Run Manual WebUI
+Validate the container configuration without starting it:
 
 ```bash
-cd tests/webui
-python -m http.server 9000
+docker compose -f kernel/docker-compose.yml config --quiet
 ```
 
-Open `http://localhost:9000`.
+## Safety and authorized use
 
-The WebUI is only a manual API acceptance tool. It is not a backend or product frontend.
+Use B-Music only for authorized CTF material or videos the authenticated user can normally access. The project does not implement CAPTCHA bypass, DRM/EME bypass, membership or region bypass, anti-bot evasion, account pooling, credential export, or cookie exfiltration.
 
-## Security Summary
+See [SECURITY.md](SECURITY.md), [kernel security boundaries](kernel/docs/SECURITY_BOUNDARY.md), and [App security boundaries](bili-music-app/src/docs/SECURITY_BOUNDARY.md).
 
-Allowed:
+## Documentation
 
-- User voluntarily imports their own Bilibili Cookie or authorized CTF account Cookie into their own `profile_id`.
-- Kernel uses that profile for authorized CTF videos or videos the user can normally access.
-- Kernel verifies sanitized login identity such as `bili_uid`, `nickname`, and login status.
+- [Kernel architecture](kernel/docs/ARCHITECTURE.md)
+- [Kernel API](kernel/docs/KERNEL_API.md)
+- [Strategy policy](kernel/docs/STRATEGY_POLICY.md)
+- [Cookie import](kernel/docs/COOKIE_IMPORT.md)
+- [App API usage](bili-music-app/src/docs/API_USAGE.md)
+- [Deployment guide](bili-music-app/src/docs/CLOUD_DEPLOYMENT.md)
+- [Contributing](CONTRIBUTING.md)
+- [Changelog](CHANGELOG.md)
 
-Forbidden:
+The tools under `tests/` are external acceptance clients. They communicate with the kernel over HTTP and do not access kernel internals.
 
-- Cookie export or leakage.
-- Any API returning Cookie, storage state, localStorage, sessionStorage, browser profile files, or sensitive headers.
-- Logging Cookie values or full signed media URLs.
-- Cross-user Cookie reuse, account pooling, CAPTCHA bypass, DRM/EME bypass, membership/region/access-control bypass.
-- Hardcoding real Cookies in code, tests, README, examples, or command-line arguments.
+## License
 
-See `kernel/docs/SECURITY_BOUNDARY.md` and `kernel/docs/COOKIE_IMPORT.md`.
+Licensed under the [Apache License 2.0](LICENSE).

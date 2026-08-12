@@ -72,9 +72,9 @@ def create_job(request: object, settings: Settings | None = None) -> dict[str, s
     now = utc_now_iso()
     outputs = list(dict.fromkeys(request.outputs))
     settings.artifacts_dir.mkdir(parents=True, exist_ok=True)
-    job_dir(request.job_id, settings).mkdir(parents=True, exist_ok=True)
-
+    target_dir = job_dir(request.job_id, settings)
     with get_connection(settings) as conn:
+        conn.execute("BEGIN IMMEDIATE")
         duplicate = conn.execute("SELECT job_id FROM jobs WHERE job_id=?", (request.job_id,)).fetchone()
         if duplicate:
             raise JobConflictError("job_id already exists")
@@ -87,13 +87,18 @@ def create_job(request: object, settings: Settings | None = None) -> dict[str, s
             raise ProfileNotFoundError(request.profile_id)
         if profile["external_owner_id"] != request.external_owner_id:
             raise ProfileOwnershipError("profile does not belong to external_owner_id")
-        if profile["active_job_id"]:
-            raise ProfileLockedError("profile already has an active job")
 
-        conn.execute(
-            "UPDATE profiles SET active_job_id=?, updated_at=? WHERE profile_id=?",
+        lock = conn.execute(
+            """
+            UPDATE profiles
+            SET active_job_id=?, updated_at=?
+            WHERE profile_id=? AND (active_job_id IS NULL OR active_job_id='')
+            """,
             (request.job_id, now, request.profile_id),
         )
+        if lock.rowcount != 1:
+            raise ProfileLockedError("profile already has an active job")
+
         conn.execute(
             """
             INSERT INTO jobs (
@@ -117,7 +122,28 @@ def create_job(request: object, settings: Settings | None = None) -> dict[str, s
             ),
         )
 
+    try:
+        target_dir.mkdir()
+    except FileExistsError as exc:
+        _rollback_created_job(request.job_id, request.profile_id, settings)
+        raise JobConflictError("job artifact directory already exists") from exc
+    except OSError:
+        _rollback_created_job(request.job_id, request.profile_id, settings)
+        raise
+
     return {"job_id": request.job_id, "status": JobState.QUEUED, "stage": JobState.QUEUED}
+
+
+def _rollback_created_job(job_id_value: str, profile_id: str, settings: Settings) -> None:
+    with get_connection(settings) as conn:
+        conn.execute("DELETE FROM jobs WHERE job_id=?", (job_id_value,))
+        conn.execute(
+            """
+            UPDATE profiles SET active_job_id=NULL, updated_at=?
+            WHERE profile_id=? AND active_job_id=?
+            """,
+            (utc_now_iso(), profile_id, job_id_value),
+        )
 
 
 async def run_job(job_id_value: str, settings: Settings | None = None) -> None:

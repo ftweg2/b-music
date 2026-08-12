@@ -3,9 +3,10 @@ services:
     build: .
     container_name: bili-ctf-audio-kernel
     env_file:
-      - .env
+      - path: .env
+        required: false
     ports:
-      - "${KERNEL_PORT:-8000}:8000"
+      - "${KERNEL_BIND_HOST:-127.0.0.1}:${KERNEL_PORT:-8000}:8000"
     volumes:
       - ./storage:/data
     healthcheck:

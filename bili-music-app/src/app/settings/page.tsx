@@ -25,7 +25,7 @@ export default function SettingsPage() {
             </tr>
             <tr>
               <th>账号模式</th>
-              <td>{process.env.APP_SINGLE_USER_MODE === "0" ? "多账号兼容模式" : "单账号同步模式"}</td>
+              <td>本地单账号模式</td>
             </tr>
             <tr>
               <th>Track artifact TTL</th>

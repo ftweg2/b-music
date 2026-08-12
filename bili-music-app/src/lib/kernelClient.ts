@@ -30,15 +30,14 @@ export function kernelBaseUrl(): string {
 }
 
 export async function getKernelHealth(): Promise<KernelHealth> {
-  const response = await fetch(`${kernelBaseUrl()}/health`, { cache: "no-store" });
+  const response = await fetch(`${kernelBaseUrl()}/health`, {
+    cache: "no-store",
+    signal: AbortSignal.timeout(kernelRequestTimeoutMs(5_000))
+  });
   if (!response.ok) {
     throw new Error(`内核健康检查失败：HTTP ${response.status}`);
   }
   return response.json() as Promise<KernelHealth>;
-}
-
-export async function prepareAudioPlaceholder(): Promise<never> {
-  throw new Error("这个 App MVP 暂未实现内核音频准备");
 }
 
 export async function submitKernelAudioJob(input: {
@@ -81,6 +80,7 @@ export async function readKernelJson<T>(path: string, init?: RequestInit): Promi
   const response = await fetch(`${kernelBaseUrl()}${path}`, {
     ...init,
     cache: "no-store",
+    signal: init?.signal || AbortSignal.timeout(kernelRequestTimeoutMs()),
     headers: {
       "content-type": "application/json",
       ...(init?.headers || {})
@@ -91,4 +91,12 @@ export async function readKernelJson<T>(path: string, init?: RequestInit): Promi
     throw new Error(payload.detail || payload.error || `内核请求失败：HTTP ${response.status}`);
   }
   return payload as T;
+}
+
+function kernelRequestTimeoutMs(fallback = 15_000): number {
+  const configured = Number(process.env.KERNEL_REQUEST_TIMEOUT_MS || fallback);
+  if (!Number.isFinite(configured)) {
+    return fallback;
+  }
+  return Math.max(1_000, Math.min(120_000, configured));
 }

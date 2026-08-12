@@ -36,7 +36,7 @@ https://music.example.com
 - 客户端只调用 `/api/*`。
 - 客户端不需要知道 kernel 地址。
 - 客户端不需要传内部 `profile_id`、`external_owner_id`、Cookie、storage state 或 artifact path。
-- 当前 MVP 默认是单用户模式。后端通过 `APP_OWNER_ID`、`KERNEL_EXTERNAL_OWNER_ID` 或登录态 cookie 决定 owner。
+- 正式版面向本地可信单用户部署。后端通过 `APP_OWNER_ID` 与 `KERNEL_EXTERNAL_OWNER_ID` 决定稳定 owner；Bilibili 登录身份仅用于本地数据隔离提示。
 
 ### 响应
 
@@ -1103,11 +1103,10 @@ SEARCH_PROVIDER=bilibili
 BILIBILI_SEARCH_TIMEOUT_MS=8000
 BILIBILI_SEARCH_LIMIT=20
 KERNEL_BASE_URL=http://localhost:8000
+KERNEL_REQUEST_TIMEOUT_MS=15000
 KERNEL_EXTERNAL_OWNER_ID=local
-KERNEL_PROFILE_ID=
 TRACK_ARTIFACT_TTL_SECONDS=86400
 DATABASE_PATH=./data/bili-music-app.sqlite
-APP_SINGLE_USER_MODE=1
 APP_OWNER_ID=local
 ```
 
@@ -1115,9 +1114,10 @@ APP_OWNER_ID=local
 
 - `SEARCH_PROVIDER`: 默认搜索 provider，可为 `bilibili`、`kernel`、`mock`。
 - `KERNEL_BASE_URL`: App 后端访问 kernel 的内部地址。
+- `KERNEL_REQUEST_TIMEOUT_MS`: App 调用 kernel JSON API 的超时上限。
 - `KERNEL_EXTERNAL_OWNER_ID`: App 与 kernel profile 映射的 owner。
 - `TRACK_ARTIFACT_TTL_SECONDS`: Track artifact 可播放窗口。
-- `APP_SINGLE_USER_MODE`: 默认单用户模式；设为 `0` 时使用 owner cookie。
+- `APP_OWNER_ID`: 本地 App metadata 的稳定 owner 标识。
 
 ## 18. 客户端最小实现清单
 

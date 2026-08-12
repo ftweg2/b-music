@@ -11,6 +11,7 @@ type LoginStatus = {
 
 export function KernelLoginPanel() {
   const [message, setMessage] = useState("");
+  const [errorMessage, setErrorMessage] = useState("");
   const [qrImageUrl, setQrImageUrl] = useState("");
   const [loginSessionId, setLoginSessionId] = useState("");
   const [loginStatus, setLoginStatus] = useState<LoginStatus | null>(null);
@@ -52,12 +53,13 @@ export function KernelLoginPanel() {
         throw new Error(payload.error || "登录状态查询失败");
       }
       setLoginStatus(payload);
+      setErrorMessage("");
       if (showMessage) {
         setMessage(payload.loggedIn ? "已登录，收藏和关注会保存在这个账号下" : "还未登录，扫码后自动刷新");
       }
     } catch (error) {
       if (showMessage) {
-        setMessage(String(error instanceof Error ? error.message : error));
+        setErrorMessage(String(error instanceof Error ? error.message : error));
       }
     }
   }
@@ -65,10 +67,11 @@ export function KernelLoginPanel() {
   async function runAction(action: () => Promise<void>) {
     setBusy(true);
     setMessage("");
+    setErrorMessage("");
     try {
       await action();
     } catch (error) {
-      setMessage(String(error instanceof Error ? error.message : error));
+      setErrorMessage(String(error instanceof Error ? error.message : error));
     } finally {
       setBusy(false);
     }
@@ -93,7 +96,8 @@ export function KernelLoginPanel() {
         <button type="button" className="secondary" onClick={() => refreshStatus(true)} disabled={busy}>
           刷新状态
         </button>
-        <span className="note">{message}</span>
+        {message ? <span className="note">{message}</span> : null}
+        {errorMessage ? <span className="errorText" role="alert">{errorMessage}</span> : null}
       </div>
 
       {qrImageUrl ? (

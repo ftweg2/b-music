@@ -157,17 +157,20 @@ SEARCH_PROVIDER=bilibili
 BILIBILI_SEARCH_TIMEOUT_MS=8000
 BILIBILI_SEARCH_LIMIT=20
 KERNEL_BASE_URL=http://127.0.0.1:8000
+KERNEL_REQUEST_TIMEOUT_MS=15000
 KERNEL_EXTERNAL_OWNER_ID=local
-KERNEL_PROFILE_ID=
 TRACK_ARTIFACT_TTL_SECONDS=86400
 DATABASE_PATH=/opt/b-music/bili-music-app/data/bili-music-app.sqlite
+APP_OWNER_ID=local
 ```
 
 关键解释：
 
 - `KERNEL_BASE_URL`：App 调 kernel 的地址。生产推荐 `http://127.0.0.1:8000`。
+- `KERNEL_REQUEST_TIMEOUT_MS`：App 调 kernel JSON API 的超时上限。
 - `DATABASE_PATH`：App 的 SQLite metadata 数据库路径。
 - `TRACK_ARTIFACT_TTL_SECONDS`：App 认为 kernel artifact 有效多久。过期后会提示重新准备。
+- `APP_OWNER_ID`：本地单用户部署使用的稳定 metadata owner。
 
 安装依赖并构建：
 

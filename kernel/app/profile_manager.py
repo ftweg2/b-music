@@ -80,30 +80,31 @@ def create_or_get_profile(external_owner_id: str, settings: Settings | None = No
     settings = settings or get_settings()
     validate_external_owner_id(external_owner_id)
     now = utc_now_iso()
+    candidate_profile_id = _new_profile_id()
     with get_connection(settings) as conn:
-        existing = conn.execute(
-            "SELECT profile_id, external_owner_id FROM profiles WHERE external_owner_id=?",
-            (external_owner_id,),
-        ).fetchone()
-        if existing:
-            profile_storage_dir(existing["profile_id"], settings).mkdir(parents=True, exist_ok=True)
-            return {
-                "profile_id": existing["profile_id"],
-                "external_owner_id": existing["external_owner_id"],
-                "status": "exists",
-            }
-
-        profile_id = _new_profile_id()
-        conn.execute(
+        inserted = conn.execute(
             """
             INSERT INTO profiles (
                 profile_id, external_owner_id, login_status, created_at, updated_at
             ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(external_owner_id) DO NOTHING
             """,
-            (profile_id, external_owner_id, LoginStatus.UNKNOWN, now, now),
+            (candidate_profile_id, external_owner_id, LoginStatus.UNKNOWN, now, now),
         )
-        profile_storage_dir(profile_id, settings).mkdir(parents=True, exist_ok=True)
-        return {"profile_id": profile_id, "external_owner_id": external_owner_id, "status": "created"}
+        profile = conn.execute(
+            "SELECT profile_id, external_owner_id FROM profiles WHERE external_owner_id=?",
+            (external_owner_id,),
+        ).fetchone()
+        if profile is None:
+            raise RuntimeError("profile upsert did not return a profile")
+        status = "created" if inserted.rowcount == 1 else "exists"
+
+    profile_storage_dir(profile["profile_id"], settings).mkdir(parents=True, exist_ok=True)
+    return {
+        "profile_id": profile["profile_id"],
+        "external_owner_id": profile["external_owner_id"],
+        "status": status,
+    }
 
 
 def get_profile(profile_id: str, settings: Settings | None = None) -> dict[str, object]:

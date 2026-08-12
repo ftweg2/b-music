@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { currentAppOwnerId } from "@/lib/appOwner";
 import { getTrackById, updateTrack } from "@/lib/db";
 import { kernelArtifactUrl } from "@/lib/kernelClient";
 import { isTrackExpired } from "@/lib/tracks";
@@ -23,7 +24,8 @@ type Params = {
 export async function GET(request: Request, { params }: Params) {
   try {
     const { id } = await params;
-    const track = getTrackById(Number(id));
+    const appOwnerId = await currentAppOwnerId();
+    const track = getTrackById(Number(id), appOwnerId);
     if (!track) {
       return NextResponse.json({ error: "Track 不存在" }, { status: 404 });
     }
@@ -31,7 +33,7 @@ export async function GET(request: Request, { params }: Params) {
       return NextResponse.json({ error: "音频还没有准备好" }, { status: 409 });
     }
     if (isTrackExpired(track)) {
-      updateTrack(track.id, { status: "expired", failureReason: "音频缓存已过期" });
+      updateTrack(track.id, { status: "expired", failureReason: "音频缓存已过期" }, appOwnerId);
       return NextResponse.json({ error: "音频缓存已过期，重新准备" }, { status: 410 });
     }
 
@@ -40,7 +42,7 @@ export async function GET(request: Request, { params }: Params) {
       headers: streamRequestHeaders(request)
     });
     if (upstream.status === 404) {
-      updateTrack(track.id, { status: "expired", failureReason: "kernel artifact not found" });
+      updateTrack(track.id, { status: "expired", failureReason: "kernel artifact not found" }, appOwnerId);
       return NextResponse.json({ error: "音频缓存已过期，重新准备" }, { status: 410 });
     }
 

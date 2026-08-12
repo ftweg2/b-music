@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { setAppOwnerCookies } from "@/lib/appOwner";
+import { clearAppOwnerCookies, setAppOwnerCookies } from "@/lib/appOwner";
 import { getDefaultKernelLoginStatus } from "@/lib/kernelSession";
 import { sanitizeText } from "@/lib/sanitize";
 
@@ -12,6 +12,8 @@ export async function GET() {
     const response = NextResponse.json(payload);
     if (payload.loggedIn) {
       setAppOwnerCookies(response, { biliUid: payload.biliUid, nickname: payload.nickname });
+    } else {
+      clearAppOwnerCookies(response);
     }
     return response;
   } catch (error) {

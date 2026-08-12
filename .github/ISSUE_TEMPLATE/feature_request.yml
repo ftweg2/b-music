@@ -1,0 +1,26 @@
+name: Feature request
+description: Suggest a scoped improvement
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user problem should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Explain the smallest useful change and whether it belongs in the App or kernel.
+    validations:
+      required: true
+  - type: textarea
+    id: boundary
+    attributes:
+      label: Security and scope impact
+      description: Describe effects on profiles, cookies, artifacts, media, network access, or authorization boundaries.
+    validations:
+      required: true

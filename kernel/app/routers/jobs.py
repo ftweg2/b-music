@@ -18,6 +18,7 @@ from app.security import sanitize_text
 
 
 router = APIRouter(prefix="/v1/jobs", tags=["jobs"])
+_job_tasks: set[asyncio.Task[None]] = set()
 
 
 @router.post("", response_model=JobCreateResponse)
@@ -35,7 +36,9 @@ async def submit_job(request: JobCreateRequest) -> dict[str, str]:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=sanitize_text(exc)) from exc
 
-    asyncio.create_task(run_job(request.job_id))
+    task = asyncio.create_task(run_job(request.job_id))
+    _job_tasks.add(task)
+    task.add_done_callback(_job_tasks.discard)
     return response
 
 

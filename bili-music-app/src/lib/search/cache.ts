@@ -13,7 +13,7 @@ import {
 import type { CandidateVideo, CandidateWithScore } from "../models";
 import { sanitizeBvid, sanitizeMid, sanitizeNullableText, sanitizeText, sanitizeUrl } from "../sanitize";
 import { rankCandidate, sortByRank, tagsOf } from "./ranker";
-import type { NormalizedCandidate, RawSearchResult } from "./types";
+import type { NormalizedCandidate, RawSearchResult, SearchProvider } from "./types";
 import { getSearchProvider } from "./provider";
 
 export type SearchRequest = {
@@ -25,6 +25,7 @@ export type SearchRequest = {
   provider?: string;
   externalOwnerId?: string;
   profileId?: string;
+  searchProvider?: SearchProvider;
 };
 
 export type SearchResponsePayload = {
@@ -47,7 +48,7 @@ export async function runSearch(request: SearchRequest): Promise<SearchResponseP
   const page = Math.max(1, Math.min(Math.round(request.page || 1), 10));
   const offset = request.useRemote ? 0 : (page - 1) * limit;
   const poolLimit = Math.min(page * limit, 500);
-  const provider = getSearchProvider(request.provider);
+  const provider = request.searchProvider ?? getSearchProvider(request.provider);
   const appOwnerId = request.appOwnerId || "local";
   const preferredCreators = listPreferredCreators(appOwnerId);
   const directBvid = sanitizeBvid(keyword);
@@ -66,21 +67,26 @@ export async function runSearch(request: SearchRequest): Promise<SearchResponseP
 
   if (request.useRemote) {
     try {
-      const raw = await provider.searchVideos(keyword, {
-        limit: Math.min(limit, Number(process.env.BILIBILI_SEARCH_LIMIT || 20)),
-        page,
-        timeoutMs: Number(process.env.BILIBILI_SEARCH_TIMEOUT_MS || 8000),
-        externalOwnerId: request.externalOwnerId,
-        profileId: request.profileId
-      });
-      const creatorRaw = await searchFollowedCreatorsRemote({
-        provider,
-        keyword,
-        preferredCreators,
-        request,
-        limit,
-        page
-      });
+      const primarySearch = () =>
+        provider.searchVideos(keyword, {
+          limit: Math.min(limit, Number(process.env.BILIBILI_SEARCH_LIMIT || 20)),
+          page,
+          timeoutMs: Number(process.env.BILIBILI_SEARCH_TIMEOUT_MS || 8000),
+          externalOwnerId: request.externalOwnerId,
+          profileId: request.profileId
+        });
+      const creatorSearch = () =>
+        searchFollowedCreatorsRemote({
+          provider,
+          keyword,
+          preferredCreators,
+          request,
+          limit,
+          page
+        });
+      const [raw, creatorRaw] = provider.supportsConcurrentSearch
+        ? await Promise.all([primarySearch(), creatorSearch()])
+        : [await primarySearch(), await creatorSearch()];
       const normalized = [...raw, ...creatorRaw].map((item) => normalizeRawSearchResult(item, keyword, provider.name));
       const upserted = normalized.map((item) => upsertRankedCandidate(item, preferredCreators, keyword));
       candidates = mergeCandidates(local, upserted);
@@ -246,7 +252,7 @@ async function searchFollowedCreatorsRemote({
   limit,
   page
 }: {
-  provider: ReturnType<typeof getSearchProvider>;
+  provider: SearchProvider;
   keyword: string;
   preferredCreators: ReturnType<typeof listPreferredCreators>;
   request: SearchRequest;
@@ -256,24 +262,30 @@ async function searchFollowedCreatorsRemote({
   if (page !== 1 || !preferredCreators.length || provider.name === "mock") {
     return [];
   }
-  const results: RawSearchResult[] = [];
-  for (const creator of preferredCreators.slice(0, 2)) {
+  const searchCreator = async (creator: (typeof preferredCreators)[number]): Promise<RawSearchResult[]> => {
     const creatorKeyword = `${keyword} ${creator.name}`.trim();
     if (!creatorKeyword || creatorKeyword === keyword) {
-      continue;
+      return [];
     }
     try {
-      const raw = await provider.searchVideos(creatorKeyword, {
+      return await provider.searchVideos(creatorKeyword, {
         limit: Math.min(6, limit),
         page: 1,
         timeoutMs: Math.min(Number(process.env.BILIBILI_SEARCH_TIMEOUT_MS || 8000), 6000),
         externalOwnerId: request.externalOwnerId,
         profileId: request.profileId
       });
-      results.push(...raw);
     } catch {
       // Followed-UP expansion is best-effort and must not hide the primary search result.
+      return [];
     }
+  };
+  if (provider.supportsConcurrentSearch) {
+    return (await Promise.all(preferredCreators.slice(0, 2).map(searchCreator))).flat();
+  }
+  const results: RawSearchResult[] = [];
+  for (const creator of preferredCreators.slice(0, 2)) {
+    results.push(...(await searchCreator(creator)));
   }
   return results;
 }

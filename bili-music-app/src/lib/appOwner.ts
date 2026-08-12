@@ -47,6 +47,7 @@ export function setAppOwnerCookies(
 ): void {
   const ownerId = appOwnerIdFromBiliUid(identity.biliUid);
   if (ownerId === LOCAL_OWNER_ID) {
+    clearAppOwnerCookies(response);
     return;
   }
   response.cookies.set(APP_OWNER_COOKIE, ownerId, {
@@ -63,5 +64,21 @@ export function setAppOwnerCookies(
       path: "/",
       maxAge: 60 * 60 * 24 * 180
     });
+  } else {
+    expireCookie(response, APP_OWNER_NAME_COOKIE);
   }
+}
+
+export function clearAppOwnerCookies(response: NextResponse): void {
+  expireCookie(response, APP_OWNER_COOKIE);
+  expireCookie(response, APP_OWNER_NAME_COOKIE);
+}
+
+function expireCookie(response: NextResponse, name: string): void {
+  response.cookies.set(name, "", {
+    httpOnly: true,
+    sameSite: "lax",
+    path: "/",
+    maxAge: 0
+  });
 }
