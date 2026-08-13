@@ -14,11 +14,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Poll a kernel job until terminal state.")
     parser.add_argument("--base-url", default="http://localhost:8000")
     parser.add_argument("--job-id", required=True)
+    parser.add_argument("--owner", required=True)
     parser.add_argument("--interval", type=float, default=2.0)
     args = parser.parse_args()
 
     while True:
-        response = httpx.get(f"{args.base_url}/v1/jobs/{args.job_id}", timeout=30)
+        response = httpx.get(
+            f"{args.base_url}/v1/jobs/{args.job_id}",
+            params={"external_owner_id": args.owner},
+            timeout=30,
+        )
         response.raise_for_status()
         payload = response.json()
         print(json.dumps(payload, indent=2))

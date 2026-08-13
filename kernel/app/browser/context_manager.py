@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,8 +14,11 @@ class ManagedBrowserContext:
     playwright: object
 
     async def close(self) -> None:
-        await self.context.close()
-        await self.playwright.stop()
+        try:
+            await self.context.close()
+        finally:
+            with contextlib.suppress(Exception):
+                await self.playwright.stop()
 
 
 class BrowserContextManager:
@@ -43,8 +47,17 @@ class BrowserContextManager:
         }
         if self.settings.playwright_browser_channel:
             launch_options["channel"] = self.settings.playwright_browser_channel
-        context = await playwright.chromium.launch_persistent_context(**launch_options)
-        if add_mse_hook:
-            hook_path = Path(__file__).with_name("mse_hook.js")
-            await context.add_init_script(path=str(hook_path))
-        return ManagedBrowserContext(context=context, playwright=playwright)
+        context = None
+        try:
+            context = await playwright.chromium.launch_persistent_context(**launch_options)
+            if add_mse_hook:
+                hook_path = Path(__file__).with_name("mse_hook.js")
+                await context.add_init_script(path=str(hook_path))
+            return ManagedBrowserContext(context=context, playwright=playwright)
+        except BaseException:
+            if context is not None:
+                with contextlib.suppress(Exception):
+                    await context.close()
+            with contextlib.suppress(Exception):
+                await playwright.stop()
+            raise

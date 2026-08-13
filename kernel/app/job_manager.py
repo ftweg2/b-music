@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
+import threading
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -16,7 +18,7 @@ from .artifact_manager import (
 from .config import Settings, get_settings
 from .db import get_connection
 from .media_pipeline import process_media
-from .models import JobState, StrategyName, StrategyStatus, utc_now_iso
+from .models import JobState, OutputType, StrategyName, StrategyStatus, utc_now_iso
 from .profile_manager import (
     ProfileLockedError,
     ProfileNotFoundError,
@@ -33,7 +35,7 @@ from .security import (
     validate_profile_id,
 )
 from .strategies.api_dash import ApiDashStrategy
-from .strategies.base import ExtractionStrategy, StrategyContext, StrategyResult
+from .strategies.base import ExtractionStrategy, StrategyCancelled, StrategyContext, StrategyResult
 from .strategies.browser_network import BrowserNetworkStrategy
 from .strategies.mse_sourcebuffer import MseSourceBufferStrategy
 from .strategy_selector import StrategyMetricSnapshot, select_strategy_order
@@ -45,6 +47,14 @@ class JobNotFoundError(LookupError):
 
 class JobConflictError(RuntimeError):
     pass
+
+
+class RequestedOutputError(RuntimeError):
+    """Media extraction worked, but one or more requested outputs were not produced."""
+
+    def __init__(self, reason: str, artifacts: list[ArtifactRecord]) -> None:
+        super().__init__(reason)
+        self.artifacts = artifacts
 
 
 def strategy_registry() -> dict[str, ExtractionStrategy]:
@@ -66,7 +76,8 @@ def create_job(request: object, settings: Settings | None = None) -> dict[str, s
     validate_job_id(request.job_id)
     validate_external_owner_id(request.external_owner_id)
     validate_profile_id(request.profile_id)
-    validate_bilibili_video_ref(request.url)
+    bvid = validate_bilibili_video_ref(request.url)
+    canonical_url = f"https://www.bilibili.com/video/{bvid}"
     if request.strategy_mode == "force" and not request.strategy:
         raise ValueError("force mode requires strategy")
     now = utc_now_iso()
@@ -110,7 +121,7 @@ def create_job(request: object, settings: Settings | None = None) -> dict[str, s
                 request.job_id,
                 request.external_owner_id,
                 request.profile_id,
-                request.url,
+                canonical_url,
                 request.strategy_mode,
                 request.strategy,
                 json.dumps(request.strategy_order),
@@ -150,6 +161,7 @@ async def run_job(job_id_value: str, settings: Settings | None = None) -> None:
     settings = settings or get_settings()
     selected_strategy: str | None = None
     profile_id: str | None = None
+    local_cancel = threading.Event()
     try:
         job = _get_job_row(job_id_value, settings)
         profile_id = str(job["profile_id"])
@@ -181,6 +193,9 @@ async def run_job(job_id_value: str, settings: Settings | None = None) -> None:
             settings=settings,
             logged_in=is_profile_logged_in(profile),
             context_hints={},
+            cancel_requested=lambda: (
+                local_cancel.is_set() or _cancel_requested(job_id_value, settings)
+            ),
         )
 
         last_result: StrategyResult | None = None
@@ -208,16 +223,43 @@ async def run_job(job_id_value: str, settings: Settings | None = None) -> None:
                     return
                 selected_strategy = strategy_name
                 _update_job_state(job_id_value, JobState.PROCESSING_MEDIA, settings, selected_strategy)
-                artifacts = _process_successful_result(context, result, strategy_name, settings)
+                artifacts = await asyncio.to_thread(
+                    _process_successful_result,
+                    context,
+                    result,
+                    strategy_name,
+                    settings,
+                )
+                if _cancel_requested(job_id_value, settings):
+                    _mark_cancelled(job_id_value, settings)
+                    return
                 _save_artifacts(job_id_value, context.job_dir, artifacts, settings)
                 _update_job_state(job_id_value, JobState.SUCCEEDED, settings, selected_strategy)
                 return
 
+        if _cancel_requested(job_id_value, settings):
+            _mark_cancelled(job_id_value, settings)
+            return
         failure_reason = "All strategies failed"
         if last_result:
             failure_reason = last_result.reason
         _write_failure_artifacts(job_id_value, failure_reason, settings)
         _update_job_state(job_id_value, JobState.FAILED, settings, selected_strategy, failure_reason)
+    except StrategyCancelled:
+        _mark_cancelled(job_id_value, settings)
+    except asyncio.CancelledError:
+        local_cancel.set()
+        _mark_cancelled(job_id_value, settings)
+        raise
+    except RequestedOutputError as exc:
+        _save_artifacts(job_id_value, job_dir(job_id_value, settings), exc.artifacts, settings)
+        _update_job_state(
+            job_id_value,
+            JobState.FAILED,
+            settings,
+            selected_strategy,
+            sanitize_text(exc),
+        )
     except Exception as exc:
         _write_failure_artifacts(job_id_value, sanitize_text(exc), settings)
         _update_job_state(job_id_value, JobState.FAILED, settings, selected_strategy, sanitize_text(exc))
@@ -241,9 +283,24 @@ def get_job_status(job_id_value: str, settings: Settings | None = None) -> dict[
     }
 
 
+def verify_job_owner(
+    job_id_value: str,
+    external_owner_id: str,
+    settings: Settings | None = None,
+) -> dict[str, object]:
+    settings = settings or get_settings()
+    validate_external_owner_id(external_owner_id)
+    job = _get_job_row(job_id_value, settings)
+    if job["external_owner_id"] != external_owner_id:
+        raise ProfileOwnershipError("job does not belong to external_owner_id")
+    return job
+
+
 def request_cancel(job_id_value: str, settings: Settings | None = None) -> dict[str, str]:
     settings = settings or get_settings()
-    _get_job_row(job_id_value, settings)
+    job = _get_job_row(job_id_value, settings)
+    if str(job["status"]) in JobState.TERMINAL:
+        return {"job_id": job_id_value, "status": str(job["status"])}
     with get_connection(settings) as conn:
         conn.execute("UPDATE jobs SET cancel_requested=1, updated_at=? WHERE job_id=?", (utc_now_iso(), job_id_value))
     return {"job_id": job_id_value, "status": "cancel_requested"}
@@ -289,6 +346,14 @@ def recover_interrupted_runtime(settings: Settings | None = None) -> dict[str, i
             """,
             (now,),
         )
+    # Recovery is a terminal transition too: consumers must see the same
+    # failure artifacts as they would for an in-process failure.
+    for job_id_value in job_ids:
+        _write_failure_artifacts(
+            job_id_value,
+            "kernel restarted before this job reached a terminal state",
+            settings,
+        )
     return {"jobs_marked_failed": len(job_ids), "profile_locks_released": len(locks)}
 
 
@@ -309,29 +374,51 @@ def cleanup_old_artifacts(settings: Settings | None = None, retention_hours: int
             """,
             (JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELLED),
         ).fetchall()
-        for row in rows:
-            terminal_at = _parse_iso(str(row["terminal_at"]))
-            if terminal_at is None or terminal_at > cutoff:
-                continue
-            job_id_value = str(row["job_id"])
-            target = job_dir(job_id_value, settings).resolve()
-            if root not in target.parents or not target.exists():
-                continue
+    expired = [
+        str(row["job_id"])
+        for row in rows
+        if (terminal_at := _parse_iso(str(row["terminal_at"]))) is not None
+        and terminal_at <= cutoff
+    ]
+    removed_job_ids: list[str] = []
+    for job_id_value in expired:
+        target = job_dir(job_id_value, settings).resolve()
+        if root not in target.parents:
+            continue
+        if target.exists():
             for file_path in target.rglob("*"):
                 if file_path.is_file():
-                    removed_files += 1
-                    removed_bytes += file_path.stat().st_size
+                    try:
+                        removed_files += 1
+                        removed_bytes += file_path.stat().st_size
+                    except FileNotFoundError:
+                        continue
             shutil.rmtree(target, ignore_errors=True)
-            conn.execute("DELETE FROM artifacts WHERE job_id=?", (job_id_value,))
-            removed_jobs += 1
+        if not target.exists():
+            removed_job_ids.append(job_id_value)
+
+    if removed_job_ids:
+        with get_connection(settings) as conn:
+            for job_id_value in removed_job_ids:
+                conn.execute("DELETE FROM artifacts WHERE job_id=?", (job_id_value,))
+    removed_jobs = len(removed_job_ids)
     return {"artifact_jobs_removed": removed_jobs, "artifact_files_removed": removed_files, "artifact_bytes_removed": removed_bytes}
 
 
 def diagnostics(settings: Settings | None = None) -> dict[str, object]:
     settings = settings or get_settings()
     root = settings.artifacts_dir.resolve()
-    artifact_files = [path for path in root.rglob("*") if path.is_file()] if root.exists() else []
-    artifact_bytes = sum(path.stat().st_size for path in artifact_files)
+    artifact_file_count = 0
+    artifact_bytes = 0
+    if root.exists():
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            try:
+                artifact_bytes += path.stat().st_size
+                artifact_file_count += 1
+            except FileNotFoundError:
+                continue
     with get_connection(settings) as conn:
         job_states = conn.execute(
             "SELECT status, COUNT(*) AS count FROM jobs GROUP BY status ORDER BY status"
@@ -367,7 +454,7 @@ def diagnostics(settings: Settings | None = None) -> dict[str, object]:
         "active_locks": [dict(row) for row in active_locks],
         "nonterminal_jobs": [dict(row) for row in nonterminal_jobs],
         "orphan_artifact_rows": int(orphan_artifacts["count"] if orphan_artifacts else 0),
-        "artifact_files": len(artifact_files),
+        "artifact_files": artifact_file_count,
         "artifact_bytes": artifact_bytes,
         "artifact_retention_hours": settings.artifact_retention_hours,
     }
@@ -391,6 +478,7 @@ def list_artifacts(job_id_value: str, settings: Settings | None = None) -> list[
 
 def artifact_path(job_id_value: str, name: str, settings: Settings | None = None) -> Path:
     settings = settings or get_settings()
+    _get_job_row(job_id_value, settings)
     safe_name = safe_artifact_name(name)
     with get_connection(settings) as conn:
         row = conn.execute(
@@ -403,6 +491,8 @@ def artifact_path(job_id_value: str, name: str, settings: Settings | None = None
     root = settings.artifacts_dir.resolve()
     if root not in path.parents and path != root:
         raise PermissionError("artifact path escaped artifact root")
+    if not path.is_file():
+        raise FileNotFoundError(safe_name)
     return path
 
 
@@ -633,11 +723,41 @@ def _process_successful_result(
             "selected_media": sanitize_dict(result.selected_media or {}),
             "strategy_warnings": pipeline_warnings(result),
         },
+        cancel_requested=context.cancel_requested,
     )
     artifacts = list(pipeline.artifacts)
     for extra_path in result.raw_artifacts[1:]:
         if extra_path.exists():
             artifacts.append(build_artifact_record(extra_path, "strategy_aux", strategy_name))
+    produced_types = {record.type for record in artifacts}
+    missing_outputs = [output for output in context.outputs if output not in produced_types]
+    if missing_outputs:
+        requested_names = {
+            OutputType.RAW: primary_raw.name,
+            OutputType.M4A: "audio.m4a",
+            OutputType.WAV: "audio.wav",
+        }
+        missing_names = [requested_names.get(output, output) for output in missing_outputs]
+        reason = f"requested output artifacts were not produced: {', '.join(missing_names)}"
+        if pipeline.warnings:
+            reason += f"; media warnings: {'; '.join(pipeline.warnings)}"
+        sanitized_reason = sanitize_text(reason)
+        failure_metadata = dict(pipeline.metadata)
+        failure_metadata.update({"status": "failed", "reason": sanitized_reason})
+        metadata_record = write_json_artifact(
+            context.job_dir,
+            "metadata.json",
+            failure_metadata,
+            "metadata",
+            strategy_name,
+        )
+        artifacts = [record for record in artifacts if record.name != "metadata.json"]
+        artifacts.append(metadata_record)
+        report_record = _write_strategy_report(context.job_id, settings)
+        artifacts.append(report_record)
+        manifest_record = write_artifact_manifest(context.job_dir, artifacts, strategy_name)
+        artifacts.append(manifest_record)
+        raise RequestedOutputError(sanitized_reason, artifacts)
     report_record = _write_strategy_report(context.job_id, settings)
     artifacts.append(report_record)
     manifest_record = write_artifact_manifest(context.job_dir, artifacts, strategy_name)

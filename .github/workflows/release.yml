@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Verify and publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: bili-music-app/package-lock.json
+      - name: Verify App
+        working-directory: bili-music-app
+        run: |
+          npm ci
+          npm test
+          npm run typecheck
+          npm run build
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: kernel/requirements.txt
+      - name: Verify kernel
+        working-directory: kernel
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pytest app/tests
+
+      - name: Validate Compose
+        run: docker compose -f kernel/docker-compose.yml config --quiet
+
+      - name: Create source archives and checksums
+        shell: bash
+        run: |
+          git archive --format=tar.gz --prefix="b-music-${GITHUB_REF_NAME}/" --output="b-music-${GITHUB_REF_NAME}.tar.gz" HEAD
+          git archive --format=zip --prefix="b-music-${GITHUB_REF_NAME}/" --output="b-music-${GITHUB_REF_NAME}.zip" HEAD
+          sha256sum "b-music-${GITHUB_REF_NAME}.tar.gz" "b-music-${GITHUB_REF_NAME}.zip" > SHA256SUMS
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --title "B-Music $GITHUB_REF_NAME" "b-music-${GITHUB_REF_NAME}.tar.gz" "b-music-${GITHUB_REF_NAME}.zip" SHA256SUMS

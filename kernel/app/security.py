@@ -28,23 +28,52 @@ ALLOWED_VIDEO_HOSTS = {
 }
 
 
+def is_bilibili_host(host: str | None) -> bool:
+    normalized = (host or "").strip().lower().rstrip(".")
+    return normalized == "bilibili.com" or normalized.endswith(".bilibili.com")
+
+
 def sanitize_url(url: str | None) -> str | None:
     if not url:
         return url
     parsed = urlparse(url)
     if not parsed.scheme or not parsed.netloc:
         return sanitize_text(url)
+    safe_netloc = parsed.hostname or ""
     safe_query = ""
     if parsed.query:
         safe_query = "<redacted>"
-    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", safe_query, ""))
+    return urlunparse((parsed.scheme, safe_netloc, parsed.path, "", safe_query, ""))
 
 
 def sanitize_text(value: object, max_length: int = 1500) -> str:
     text = str(value)
+    # Header syntax commonly separates the name from its value with a space
+    # (for example ``Authorization Bearer …``), not only ``:`` or ``=``.
+    # Redact the complete value through the end of the header line.
+    text = re.sub(
+        r"((?:authorization|proxy-authorization)\s+(?:(?:bearer|basic)\s+)?)"
+        r"[^,;\r\n]+",
+        r"\1<redacted>",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"((?:cookie|set-cookie)\s*(?::|=|\s)\s*)[^,;\r\n]+",
+        r"\1<redacted>",
+        text,
+        flags=re.IGNORECASE,
+    )
     text = re.sub(
         r"(authorization\s*[=:]\s*)(?:(?:bearer|basic)\s+)?[^,\s;]+",
         r"\1<redacted>",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"((?:authorization|cookie|sessdata|bili_jct|dedeuserid|access_key|csrf|token|"
+        r"localstorage|sessionstorage|storage_state)[\"']?\s*:\s*[\"'])(.*?)([\"'])",
+        r"\1<redacted>\3",
         text,
         flags=re.IGNORECASE,
     )

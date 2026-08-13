@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 from app.config import Settings
 from app.models import StrategyStatus
+
+
+class StrategyCancelled(RuntimeError):
+    """Raised when a cooperative strategy or media step observes job cancellation."""
 
 
 @dataclass(frozen=True)
@@ -19,6 +23,11 @@ class StrategyContext:
     settings: Settings
     logged_in: bool
     context_hints: dict[str, object] = field(default_factory=dict)
+    cancel_requested: Callable[[], bool] | None = None
+
+    def raise_if_cancelled(self) -> None:
+        if self.cancel_requested and self.cancel_requested():
+            raise StrategyCancelled("Job cancelled")
 
 
 @dataclass(frozen=True)

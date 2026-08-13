@@ -1,22 +1,42 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.db import init_db
 from app.job_manager import cleanup_old_artifacts, recover_interrupted_runtime
+from app.profile_manager import recover_stale_login_sessions, shutdown_login_runtimes
 from app.routers import artifacts, diagnostics, jobs, profiles, search, strategies, videos
 from app.schemas import HealthResponse
 
 
+settings = get_settings()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    settings.ensure_dirs()
+    init_db(settings)
+    recover_interrupted_runtime(settings)
+    recover_stale_login_sessions(settings)
+    cleanup_old_artifacts(settings)
+    try:
+        yield
+    finally:
+        await jobs.shutdown_job_tasks()
+        await shutdown_login_runtimes()
+
+
 app = FastAPI(
     title="bili-ctf-audio-kernel",
-    version="1.0.0",
+    version="1.1.0",
     description="Kernel-only authorized Bilibili CTF audio extraction service.",
+    lifespan=lifespan,
 )
 
-settings = get_settings()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -24,14 +44,6 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["content-type"],
 )
-
-
-@app.on_event("startup")
-def startup() -> None:
-    settings.ensure_dirs()
-    init_db(settings)
-    recover_interrupted_runtime(settings)
-    cleanup_old_artifacts(settings)
 
 
 @app.get("/")

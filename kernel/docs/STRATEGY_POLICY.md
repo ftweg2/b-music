@@ -36,7 +36,7 @@ Default order:
 2. `browser_network`
 3. `mse_sourcebuffer`
 
-The MVP runs strategies sequentially and does not parallelize.
+The kernel runs strategies sequentially and does not parallelize them.
 
 ## Metrics
 

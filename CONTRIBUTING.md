@@ -2,6 +2,8 @@
 
 Thank you for helping improve B-Music. Bug fixes, tests, documentation, accessibility improvements, and carefully scoped features are welcome.
 
+Participation in this project is governed by the [Code of Conduct](CODE_OF_CONDUCT.md). For usage questions and supported environments, read [SUPPORT.md](SUPPORT.md) before opening an issue.
+
 ## Before opening a change
 
 - Search existing issues and pull requests.

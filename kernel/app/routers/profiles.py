@@ -60,11 +60,10 @@ async def login_start(
 @router.get("/{profile_id}/login/status", response_model=LoginStatusResponse)
 def login_status(
     profile_id: str,
-    external_owner_id: str | None = Query(default=None, min_length=1, max_length=128),
+    external_owner_id: str = Query(..., min_length=1, max_length=128),
 ) -> dict[str, object]:
     try:
-        if external_owner_id:
-            verify_profile_owner(profile_id, external_owner_id)
+        verify_profile_owner(profile_id, external_owner_id)
         return get_login_status(profile_id)
     except ProfileOwnershipError as exc:
         raise HTTPException(status_code=403, detail=sanitize_text(exc)) from exc

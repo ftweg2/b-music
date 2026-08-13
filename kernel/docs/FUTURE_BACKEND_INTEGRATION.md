@@ -33,7 +33,7 @@ A future backend can call this kernel through its HTTP API. The backend should r
 3. Backend displays `qr_image_url` from the kernel to that same owner only.
 4. Backend polls `GET /v1/profiles/{profile_id}/login/status?external_owner_id=...` and stores only sanitized identity/status.
 5. Backend submits jobs with `POST /v1/jobs`.
-6. Backend polls `GET /v1/jobs/{job_id}`.
+6. Backend polls `GET /v1/jobs/{job_id}?external_owner_id=...` using the same owner id.
 7. Backend lists and downloads artifacts through the kernel API.
 
 The backend may pass user-provided cookies, browser Cookie header text, or Playwright storage state to the kernel import API when the local user owns the account or is using an authorized CTF account. The backend must not store that raw payload, log it, share it across users, or request it back from the kernel.

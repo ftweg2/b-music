@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
+import shutil
 import time
 from typing import Any
 
@@ -11,7 +13,11 @@ from app.browser.context_manager import BrowserContextManager
 from app.models import StrategyName
 from app.security import sanitize_text
 from app.strategies.browser_network import _trigger_player_load
-from app.strategies.base import StrategyContext, StrategyResult
+from app.strategies.base import StrategyCancelled, StrategyContext, StrategyResult
+
+
+class MseCaptureLimitExceeded(RuntimeError):
+    pass
 
 
 class MseSourceBufferStrategy:
@@ -28,15 +34,28 @@ class MseSourceBufferStrategy:
         raw_path = context.job_dir / "raw.m4s"
         manager = BrowserContextManager(context.settings)
         managed = None
+        media_probe: CdpMediaProbe | None = None
         segment_manifest: list[dict[str, object]] = []
+        captured_bytes = 0
 
         async def receive_segment(_source: object, payload: dict[str, object]) -> None:
-            order = int(payload.get("order") or len(segment_manifest))
+            nonlocal captured_bytes
+            context.raise_if_cancelled()
+            order_value = payload.get("order")
+            order = int(order_value) if order_value is not None else len(segment_manifest)
             data = base64.b64decode(str(payload.get("dataBase64") or ""))
             if not data:
                 return
+            if len(data) > context.settings.mse_max_segment_bytes:
+                raise MseCaptureLimitExceeded("MSE segment exceeded capture size limit")
+            if len(segment_manifest) >= context.settings.mse_max_segments:
+                raise MseCaptureLimitExceeded("MSE segment count exceeded capture limit")
+            if captured_bytes + len(data) > context.settings.mse_max_capture_bytes:
+                raise MseCaptureLimitExceeded("MSE capture exceeded total size limit")
             segment_path = segments_dir / f"segment_{order:06d}.m4s"
-            segment_path.write_bytes(data)
+            temp_path = segment_path.with_suffix(".tmp")
+            temp_path.write_bytes(data)
+            temp_path.replace(segment_path)
             segment_manifest.append(
                 {
                     "name": segment_path.name,
@@ -46,6 +65,7 @@ class MseSourceBufferStrategy:
                     "sha256": hashlib.sha256(data).hexdigest(),
                 }
             )
+            captured_bytes += len(data)
 
         try:
             video_url = normalize_video_url(context.url)
@@ -65,9 +85,17 @@ class MseSourceBufferStrategy:
                 page,
                 context.settings.mse_capture_ms,
                 context.settings.mse_playback_rate,
+                context,
             )
-            mse_stats = await _mse_stats(page)
-            page_diagnostics = await _page_media_diagnostics(page)
+            context.raise_if_cancelled()
+            mse_stats = await _bounded_browser_result(
+                _mse_stats(page),
+                {"installed": False, "error": "MSE stats timed out"},
+            )
+            page_diagnostics = await _bounded_browser_result(
+                _page_media_diagnostics(page),
+                {"error": "Page media diagnostics timed out"},
+            )
             cdp_media = media_probe.summary()
 
             if not segment_manifest:
@@ -96,9 +124,28 @@ class MseSourceBufferStrategy:
                 )
 
             ordered = sorted(segment_manifest, key=lambda item: int(item["order"]))
-            with raw_path.open("wb") as output:
-                for item in ordered:
-                    output.write((segments_dir / str(item["name"])).read_bytes())
+            expected_orders = list(range(len(ordered)))
+            actual_orders = [int(item["order"]) for item in ordered]
+            if actual_orders != expected_orders:
+                return StrategyResult.failed(
+                    failure_code="MSE_SEGMENT_SEQUENCE_INVALID",
+                    reason="Captured MSE segment sequence contained a gap or duplicate",
+                    timings={"duration_ms": _elapsed_ms(started)},
+                    sanitized_debug_info={"segment_count": len(ordered)},
+                )
+            raw_temp_path = raw_path.with_name(f".{raw_path.name}.merge")
+            try:
+                with raw_temp_path.open("wb") as output:
+                    for item in ordered:
+                        context.raise_if_cancelled()
+                        with (segments_dir / str(item["name"])).open("rb") as segment:
+                            shutil.copyfileobj(segment, output, length=1024 * 1024)
+                raw_temp_path.replace(raw_path)
+            finally:
+                try:
+                    raw_temp_path.unlink()
+                except FileNotFoundError:
+                    pass
 
             write_json_artifact(
                 context.job_dir,
@@ -125,6 +172,18 @@ class MseSourceBufferStrategy:
                     "cdp_media": cdp_media,
                 },
             )
+        except StrategyCancelled:
+            raise
+        except MseCaptureLimitExceeded as exc:
+            return StrategyResult.failed(
+                failure_code="MSE_CAPTURE_LIMIT_EXCEEDED",
+                reason=sanitize_text(exc),
+                timings={"duration_ms": _elapsed_ms(started)},
+                sanitized_debug_info={
+                    "segment_count": len(segment_manifest),
+                    "captured_bytes": captured_bytes,
+                },
+            )
         except Exception as exc:
             return StrategyResult.failed(
                 failure_code="MSE_SOURCEBUFFER_FAILED",
@@ -132,12 +191,31 @@ class MseSourceBufferStrategy:
                 timings={"duration_ms": _elapsed_ms(started)},
             )
         finally:
+            if media_probe is not None:
+                await media_probe.detach()
             if managed is not None:
-                await managed.close()
+                try:
+                    await asyncio.wait_for(managed.close(), timeout=10)
+                except asyncio.TimeoutError:
+                    pass
+                except Exception:
+                    pass
+            shutil.rmtree(segments_dir, ignore_errors=True)
 
 
 def _elapsed_ms(started: float) -> int:
     return int((time.perf_counter() - started) * 1000)
+
+
+async def _bounded_browser_result(
+    awaitable: Any,
+    fallback: dict[str, object],
+    timeout_seconds: float = 5.0,
+) -> dict[str, object]:
+    try:
+        return await asyncio.wait_for(awaitable, timeout=timeout_seconds)
+    except asyncio.TimeoutError:
+        return fallback
 
 
 async def _mse_stats(page: object) -> dict[str, object]:
@@ -148,12 +226,19 @@ async def _mse_stats(page: object) -> dict[str, object]:
         return {"installed": False}
 
 
-async def _wait_for_mse_activity(page: object, wait_ms: int, playback_rate: float) -> None:
+async def _wait_for_mse_activity(
+    page: object,
+    wait_ms: int,
+    playback_rate: float,
+    context: StrategyContext,
+) -> None:
     deadline = time.perf_counter() + (wait_ms / 1000)
     interval_ms = 1000
     next_trigger_at = time.perf_counter()
     while time.perf_counter() < deadline:
-        await page.wait_for_timeout(interval_ms)
+        context.raise_if_cancelled()
+        remaining_ms = max(0, int((deadline - time.perf_counter()) * 1000))
+        await page.wait_for_timeout(min(interval_ms, remaining_ms))
         now = time.perf_counter()
         if now >= next_trigger_at:
             await _keep_mse_media_playing(page, playback_rate)
@@ -168,7 +253,7 @@ async def _trigger_mse_player_load(page: object, playback_rate: float) -> None:
     try:
         await page.evaluate(
             """
-            async (rate) => {
+            (rate) => {
               const candidates = [
                 ".bpx-player-ctrl-play",
                 ".bilibili-player-video-btn-start",
@@ -186,7 +271,7 @@ async def _trigger_mse_player_load(page: object, playback_rate: float) -> None:
                   video.playbackRate = rate;
                   const playPromise = video.play();
                   if (playPromise && typeof playPromise.catch === "function") {
-                    await playPromise.catch(() => {});
+                    playPromise.catch(() => {});
                   }
                 } catch (_error) {}
               }
@@ -202,7 +287,7 @@ async def _keep_mse_media_playing(page: object, playback_rate: float) -> None:
     try:
         await page.evaluate(
             """
-            async (rate) => {
+            (rate) => {
               for (const video of Array.from(document.querySelectorAll("video")).slice(0, 3)) {
                 try {
                   video.muted = true;
@@ -210,7 +295,7 @@ async def _keep_mse_media_playing(page: object, playback_rate: float) -> None:
                   if (video.paused || video.readyState < 3) {
                     const playPromise = video.play();
                     if (playPromise && typeof playPromise.catch === "function") {
-                      await playPromise.catch(() => {});
+                      playPromise.catch(() => {});
                     }
                   }
                 } catch (_error) {}
@@ -302,6 +387,16 @@ class CdpMediaProbe:
             self.available = True
         except Exception as exc:
             self.error = sanitize_text(exc)
+
+    async def detach(self) -> None:
+        if self.session is None:
+            return
+        try:
+            await asyncio.wait_for(self.session.detach(), timeout=3)
+        except Exception:
+            pass
+        finally:
+            self.session = None
 
     def _on_player_created(self, params: dict[str, object]) -> None:
         player = params.get("player") or {}
