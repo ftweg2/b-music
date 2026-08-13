@@ -10,8 +10,9 @@ All notable changes to B-Music are documented here. The project follows [Semanti
 - Job cancellation during downloads, browser capture, MSE capture, and media processing.
 - Owner-scoped authorization tests for jobs, artifacts, profiles, QR images, and diagnostics.
 - Bounded MSE segment count, per-segment size, and total-capture size limits.
-- Dependency review, container health smoke testing, and tag-driven GitHub Release automation.
+- Automated npm/Python dependency auditing, container health smoke testing, and tag-driven GitHub Release automation.
 - Public support, conduct, and maintainer guidance for contributors.
+- Patched FastAPI/Starlette and pytest dependencies verified by automated vulnerability auditing.
 
 ### Changed
 

@@ -13,7 +13,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/dependency-review-action@v4
+
+      - uses: actions/setup-node@v4
         with:
-          fail-on-severity: high
-          deny-licenses: AGPL-1.0-only, AGPL-1.0-or-later, AGPL-3.0-only, AGPL-3.0-or-later
+          node-version: 22
+          cache: npm
+          cache-dependency-path: bili-music-app/package-lock.json
+      - name: Audit App production dependencies
+        working-directory: bili-music-app
+        run: |
+          npm ci --ignore-scripts
+          npm audit --omit=dev --audit-level=high
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: kernel/requirements.txt
+      - name: Audit kernel dependencies
+        working-directory: kernel
+        run: |
+          python -m pip install --upgrade pip pip-audit
+          python -m pip install -r requirements.txt
+          python -m pip check
+          python -m pip_audit --requirement requirements.txt
