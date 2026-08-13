@@ -1,10 +1,21 @@
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from threading import Barrier
 
+import pytest
+
 from app.config import Settings, get_settings
 from app.db import get_connection, init_db
-from app.profile_manager import create_or_get_profile
+from app.models import LoginStatus
+from app.profile_manager import (
+    CookieImportError,
+    create_or_get_profile,
+    get_login_qr_image_path,
+    import_cookies_to_profile,
+    parse_cookie_import,
+    start_login,
+)
 
 
 def test_create_or_get_profile_is_atomic_for_concurrent_requests(tmp_path) -> None:
@@ -47,3 +58,143 @@ def make_settings(tmp_path) -> Settings:
         artifacts_dir=tmp_path / "artifacts",
         profiles_dir=tmp_path / "profiles",
     )
+
+
+def test_login_qr_is_not_readable_after_session_terminal(tmp_path) -> None:
+    settings = make_settings(tmp_path)
+    init_db(settings)
+    profile = create_or_get_profile("owner", settings)
+    login_session_id = "ls_1234567890abcdef"
+    qr_dir = settings.profiles_dir / profile["profile_id"] / "login_sessions" / login_session_id
+    qr_dir.mkdir(parents=True)
+    (qr_dir / "qr.png").write_bytes(b"fake-qr")
+    with get_connection(settings) as conn:
+        conn.execute(
+            "INSERT INTO login_sessions (login_session_id, profile_id, status, message, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))",
+            (login_session_id, profile["profile_id"], LoginStatus.LOGGED_OUT, "done"),
+        )
+
+    with pytest.raises(FileNotFoundError):
+        get_login_qr_image_path(
+            profile_id=profile["profile_id"],
+            login_session_id=login_session_id,
+            external_owner_id="owner",
+            settings=settings,
+        )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [{"name": "a", "value": "x" * 16_385}],
+        [{"name": str(index), "value": "x"} for index in range(257)],
+    ],
+)
+def test_cookie_import_rejects_oversized_entries(payload) -> None:
+    with pytest.raises(CookieImportError):
+        parse_cookie_import("json", payload)
+
+
+def test_storage_state_import_rejects_oversized_local_storage(tmp_path) -> None:
+    with pytest.raises(CookieImportError, match="localStorage"):
+        parse_cookie_import(
+            "playwright_storage_state",
+            {
+                "cookies": [],
+                "origins": [
+                    {
+                        "origin": "https://www.bilibili.com",
+                        "localStorage": [
+                            {"name": "oversized", "value": "x" * 65_537}
+                        ],
+                    }
+                ],
+            },
+        )
+
+
+def test_cancelled_login_start_releases_profile_lock(tmp_path, monkeypatch) -> None:
+    settings = make_settings(tmp_path)
+    init_db(settings)
+    profile = create_or_get_profile("owner", settings)
+
+    class CancelledBrowserContextManager:
+        def __init__(self, _settings) -> None:
+            pass
+
+        async def open_context(self, _profile_id):
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(
+        "app.browser.context_manager.BrowserContextManager",
+        CancelledBrowserContextManager,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(start_login(profile["profile_id"], "owner", settings))
+
+    with get_connection(settings) as conn:
+        stored_profile = conn.execute(
+            "SELECT active_job_id, login_status FROM profiles WHERE profile_id=?",
+            (profile["profile_id"],),
+        ).fetchone()
+        session = conn.execute(
+            "SELECT status FROM login_sessions WHERE profile_id=?",
+            (profile["profile_id"],),
+        ).fetchone()
+    assert stored_profile["active_job_id"] is None
+    assert stored_profile["login_status"] == LoginStatus.LOGGED_OUT
+    assert session["status"] == LoginStatus.LOGGED_OUT
+
+
+def test_cookie_import_close_failure_still_releases_profile_lock(
+    tmp_path, monkeypatch
+) -> None:
+    settings = make_settings(tmp_path)
+    init_db(settings)
+    profile = create_or_get_profile("owner", settings)
+
+    class FakeContext:
+        async def add_cookies(self, _cookies) -> None:
+            pass
+
+    class CloseFailureManaged:
+        context = FakeContext()
+
+        async def close(self) -> None:
+            raise RuntimeError("expected close failure")
+
+    class FakeBrowserContextManager:
+        def __init__(self, _settings) -> None:
+            pass
+
+        async def open_context(self, _profile_id):
+            return CloseFailureManaged()
+
+    async def fake_identity(_context, _settings):
+        return {"logged_in": False, "bili_uid": None, "nickname": None}
+
+    monkeypatch.setattr(
+        "app.browser.context_manager.BrowserContextManager",
+        FakeBrowserContextManager,
+    )
+    monkeypatch.setattr("app.profile_manager._verify_bilibili_identity", fake_identity)
+
+    with pytest.raises(RuntimeError, match="expected close failure"):
+        asyncio.run(
+            import_cookies_to_profile(
+                profile_id=profile["profile_id"],
+                external_owner_id="owner",
+                format_name="cookie_header",
+                cookies_payload="SESSDATA=fake-value",
+                settings=settings,
+            )
+        )
+
+    with get_connection(settings) as conn:
+        stored = conn.execute(
+            "SELECT active_job_id FROM profiles WHERE profile_id=?",
+            (profile["profile_id"],),
+        ).fetchone()
+    assert stored["active_job_id"] is None

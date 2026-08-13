@@ -97,6 +97,10 @@ class JobStatusResponse(BaseModel):
     updated_at: str
 
 
+class JobAccessRequest(BaseModel):
+    external_owner_id: str = Field(min_length=1, max_length=128)
+
+
 class CancelResponse(BaseModel):
     job_id: str
     status: str

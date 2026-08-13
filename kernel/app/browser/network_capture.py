@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import re
 from dataclasses import asdict, dataclass
 
 from app.security import sanitize_url
@@ -33,6 +35,75 @@ def _content_length(headers: dict[str, str]) -> int:
         return 0
 
 
+# Bilibili's DASH URLs commonly encode the representation id as the final
+# numeric component of the ``.m4s`` path.  Audio representations use the
+# 302xx range while video representations (including AV1) use 1000xx ids.
+# Keep these checks deliberately narrow: a generic ``media`` request is not
+# enough evidence that downloading it will produce an audio-only artifact.
+_AUDIO_TRACK_ID_RE = re.compile(r"(?<!\d)302\d{2}(?!\d)")
+_VIDEO_TRACK_ID_RE = re.compile(r"(?<!\d)100\d{3}(?!\d)")
+_VIDEO_CODEC_RE = re.compile(
+    r"(?<![a-z0-9])(?:av01?|avc1|h(?:26[45])|hev1|hvc1|vp0?[89]|vp09)"
+    r"(?:[.\-_]|$)",
+    re.IGNORECASE,
+)
+_AUDIO_CODEC_RE = re.compile(
+    r"(?<![a-z0-9])(?:mp4a|aac|opus|vorbis|flac|ac-3|ec-3)(?:[.\-_]|$)",
+    re.IGNORECASE,
+)
+_VIDEO_URL_RE = re.compile(r"(?<![a-z])video(?:[./_?=&-]|$)", re.IGNORECASE)
+_AUDIO_URL_RE = re.compile(
+    r"(?<![a-z])(?:audio|m4a|aac|opus|vorbis|flac)(?:[./_?=&-]|$)",
+    re.IGNORECASE,
+)
+
+
+def _media_kind(
+    url: str,
+    content_type: str,
+    *,
+    reasons: list[str] | None = None,
+    playurl_audio_hosts: set[str] | None = None,
+) -> str:
+    """Classify a captured response as audio, video, or unknown.
+
+    Browser network responses often use ``application/octet-stream`` for both
+    DASH audio and video segments.  In that case we only classify the
+    candidate as audio when the URL carries an audio signal (or it came from
+    the explicitly audio-only DASH list).  Video signals always win when a
+    response contains contradictory metadata.
+    """
+
+    lower_url = url.lower()
+    lower_content_type = content_type.lower()
+    combined = f"{lower_url} {lower_content_type}"
+
+    if lower_content_type.startswith("video/") or _VIDEO_CODEC_RE.search(combined):
+        return "video"
+
+    # Track ids and path markers are checked before audio hints so a
+    # contradictory response (for example, an incorrectly labelled
+    # ``audio/mp4`` video URL) is still rejected as video.
+    if _VIDEO_TRACK_ID_RE.search(lower_url) or _VIDEO_URL_RE.search(lower_url):
+        return "video"
+
+    if playurl_audio_hosts and any(
+        host.lower() in lower_url for host in playurl_audio_hosts if host
+    ):
+        return "audio"
+
+    if (
+        lower_content_type.startswith("audio/")
+        or _AUDIO_TRACK_ID_RE.search(lower_url)
+        or _AUDIO_CODEC_RE.search(combined)
+        or _AUDIO_URL_RE.search(lower_url)
+        or (reasons and "playurl_dash_audio" in reasons)
+        or (reasons and "browser_context_playurl_dash_audio" in reasons)
+    ):
+        return "audio"
+    return "unknown"
+
+
 def score_candidate(
     url: str,
     status: int,
@@ -62,6 +133,18 @@ def score_candidate(
         reasons.append("blocked_non_media_endpoint")
         return -100.0, reasons
 
+    media_kind = _media_kind(
+        url,
+        content_type,
+        playurl_audio_hosts=playurl_audio_hosts,
+    )
+    if media_kind == "video":
+        # A video response can carry a stronger generic media score than an
+        # audio response (for example, a large AV1 segment).  Reject it
+        # before scoring so it can never become the selected audio candidate.
+        reasons.append("video_track")
+        return -100.0, reasons
+
     if status in {200, 206}:
         score += 10
         reasons.append("http_media_status")
@@ -69,14 +152,9 @@ def score_candidate(
         score += 30
         reasons.append("audio_mp4_content_type")
         media_signal = True
-    elif "video/mp4" in content_type:
-        score += 8
-        reasons.append("mp4_content_type")
-        media_signal = True
     elif "application/octet-stream" in content_type:
         score += 8
         reasons.append("octet_stream_content_type")
-        media_signal = True
     elif "application/json" in content_type or "text/" in content_type:
         score -= 35
         reasons.append("structured_non_media_content_type")
@@ -111,6 +189,12 @@ def score_candidate(
     if not media_signal:
         score -= 50
         reasons.append("missing_media_signal")
+    if media_kind != "audio":
+        # ``application/octet-stream`` and generic ``.m4s`` URLs are used for
+        # both DASH tracks.  Require an explicit audio signal before retaining
+        # a candidate; otherwise a high-bandwidth video segment could win.
+        score -= 100
+        reasons.append("missing_audio_signal")
     return score, reasons
 
 
@@ -119,9 +203,33 @@ class NetworkCapture:
         self._candidates: list[MediaCandidate] = []
         self._response_count = 0
         self._rejected_reasons: dict[str, int] = {}
+        self._pending_tasks: set[asyncio.Task[None]] = set()
+        self._attached_page: object | None = None
+        self._response_handler: object | None = None
 
     def attach(self, page: object) -> None:
-        page.on("response", lambda response: asyncio.create_task(self.record_response(response)))
+        def on_response(response: object) -> None:
+            task = asyncio.create_task(self.record_response(response))
+            self._pending_tasks.add(task)
+            task.add_done_callback(self._pending_tasks.discard)
+
+        self._attached_page = page
+        self._response_handler = on_response
+        page.on("response", on_response)
+
+    async def finish(self) -> None:
+        """Detach the listener and drain in-flight response handlers before selecting."""
+        if self._attached_page is not None and self._response_handler is not None:
+            remove_listener = getattr(self._attached_page, "remove_listener", None)
+            if callable(remove_listener):
+                with contextlib.suppress(Exception):
+                    remove_listener("response", self._response_handler)
+        pending = list(self._pending_tasks)
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        self._pending_tasks.clear()
+        self._attached_page = None
+        self._response_handler = None
 
     async def record_response(self, response: object) -> None:
         try:
@@ -195,9 +303,19 @@ class NetworkCapture:
         return found
 
     def best_candidate(self) -> MediaCandidate | None:
-        if not self._candidates:
+        audio_candidates = [
+            candidate
+            for candidate in self._candidates
+            if _media_kind(
+                candidate.actual_url,
+                candidate.content_type,
+                reasons=candidate.reasons,
+            )
+            == "audio"
+        ]
+        if not audio_candidates:
             return None
-        return max(self._candidates, key=lambda candidate: candidate.score)
+        return max(audio_candidates, key=lambda candidate: candidate.score)
 
     def sanitized_candidates(self, limit: int = 10) -> list[dict[str, object]]:
         ordered = sorted(self._candidates, key=lambda candidate: candidate.score, reverse=True)

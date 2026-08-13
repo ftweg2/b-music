@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import mimetypes
+import os
 import re
+import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -63,7 +65,7 @@ def write_json_artifact(
 ) -> ArtifactRecord:
     safe_name = safe_artifact_name(name)
     path = job_dir / safe_name
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    _atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True))
     return build_artifact_record(path, artifact_type, producer_strategy)
 
 
@@ -74,11 +76,38 @@ def write_artifact_manifest(
 ) -> ArtifactRecord:
     manifest_items = [asdict(record) for record in artifacts if record.name != "artifact_manifest.json"]
     manifest_path = job_dir / "artifact_manifest.json"
-    manifest_path.write_text(
+    _atomic_write_text(
+        manifest_path,
         json.dumps({"artifacts": manifest_items}, indent=2, sort_keys=True),
-        encoding="utf-8",
     )
     return build_artifact_record(manifest_path, "manifest", producer_strategy)
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Replace a JSON artifact only after its complete contents reach a sibling temp file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+            temp_path = Path(handle.name)
+        temp_path.replace(path)
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def record_to_dict(record: ArtifactRecord) -> dict[str, object]:

@@ -143,7 +143,7 @@ export async function syncTrackWithKernel(track: Track): Promise<Track> {
     return updateTrack(track.id, { status: "pending", failureReason: null }, track.externalOwnerId);
   }
   try {
-    const job = await getKernelJob(track.kernelJobId);
+    const job = await getKernelJob(track.kernelJobId, track.externalOwnerId);
     if (job.status === "succeeded") {
       return syncSucceededJob(track, job);
     }
@@ -192,7 +192,7 @@ function expireIfNeeded(track: Track): Track {
 }
 
 async function syncSucceededJob(track: Track, job: KernelJobStatus): Promise<Track> {
-  const artifactList = await listKernelArtifacts(job.job_id);
+  const artifactList = await listKernelArtifacts(job.job_id, track.externalOwnerId);
   const artifact = selectPlayableArtifact(artifactList.artifacts);
   if (!artifact) {
     return updateTrack(track.id, {

@@ -37,10 +37,13 @@ export async function GET(request: Request, { params }: Params) {
       return NextResponse.json({ error: "音频缓存已过期，重新准备" }, { status: 410 });
     }
 
-    const upstream = await fetch(kernelArtifactUrl(track.kernelJobId, track.artifactName), {
+    const upstream = await fetch(
+      kernelArtifactUrl(track.kernelJobId, track.artifactName, track.externalOwnerId),
+      {
       cache: "no-store",
       headers: streamRequestHeaders(request)
-    });
+      }
+    );
     if (upstream.status === 404) {
       updateTrack(track.id, { status: "expired", failureReason: "kernel artifact not found" }, appOwnerId);
       return NextResponse.json({ error: "音频缓存已过期，重新准备" }, { status: 410 });

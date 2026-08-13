@@ -75,9 +75,11 @@ async def search_videos_with_profile(
             "results": [_normalize_result(item) for item in results if isinstance(item, dict)][:limit],
         }
     finally:
-        if managed is not None:
-            await managed.close()
-        release_profile_lock(profile_id, lock_id, settings)
+        try:
+            if managed is not None:
+                await managed.close()
+        finally:
+            release_profile_lock(profile_id, lock_id, settings)
 
 
 def _search_url(keyword: str, limit: int, page: int = 1) -> str:
@@ -103,6 +105,14 @@ def _assert_profile_search_rate(profile_id: str) -> None:
         raise KernelSearchError("search rate limit exceeded; wait before searching again")
     timestamps.append(now)
     _SEARCH_BUCKETS[profile_id] = timestamps
+    if len(_SEARCH_BUCKETS) > 1024:
+        stale_profiles = [
+            key
+            for key, values in _SEARCH_BUCKETS.items()
+            if key != profile_id and not any(now - stamp < window_seconds for stamp in values)
+        ]
+        for key in stale_profiles:
+            _SEARCH_BUCKETS.pop(key, None)
 
 
 def _normalize_result(item: dict[str, Any]) -> dict[str, object]:

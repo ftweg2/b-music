@@ -4,9 +4,11 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import shutil
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlparse
@@ -15,6 +17,7 @@ from .config import Settings, get_settings
 from .db import get_connection
 from .models import LoginStatus, utc_now_iso
 from .security import (
+    is_bilibili_host,
     sanitize_text,
     validate_external_owner_id,
     validate_login_session_id,
@@ -64,6 +67,20 @@ class LoginRuntime:
 
 _LOGIN_RUNTIMES: dict[str, LoginRuntime] = {}
 _LOGIN_RUNTIME_LOCK: asyncio.Lock | None = None
+
+# Imported browser state is user-controlled input.  Keep the parser bounded so
+# a single request cannot create an unbounded number of browser entries or
+# force an oversized JSON payload into a Playwright context.
+MAX_COOKIE_IMPORT_PAYLOAD_BYTES = 1 * 1024 * 1024
+MAX_COOKIE_ENTRIES = 256
+MAX_COOKIE_NAME_LENGTH = 256
+MAX_COOKIE_VALUE_LENGTH = 16 * 1024
+MAX_COOKIE_PATH_LENGTH = 4096
+MAX_STORAGE_ORIGINS = 32
+MAX_LOCAL_STORAGE_ENTRIES = 256
+MAX_LOCAL_STORAGE_KEY_LENGTH = 1024
+MAX_LOCAL_STORAGE_VALUE_LENGTH = 64 * 1024
+MAX_LOCAL_STORAGE_TOTAL_BYTES = 512 * 1024
 
 
 def _new_profile_id() -> str:
@@ -176,7 +193,6 @@ async def start_login(
     lock_id = f"login_{login_session_id}"
     now = utc_now_iso()
     qr_dir = profile_storage_dir(profile_id, settings) / "login_sessions" / login_session_id
-    qr_dir.mkdir(parents=True, exist_ok=True)
     qr_path = qr_dir / "qr.png"
     message = (
         "Scan the QR image from the kernel profile login page. "
@@ -184,20 +200,21 @@ async def start_login(
     )
     lock_profile(profile_id, lock_id, settings)
     managed = None
-    with get_connection(settings) as conn:
-        conn.execute(
-            """
-            INSERT INTO login_sessions (
-                login_session_id, profile_id, status, message, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (login_session_id, profile_id, LoginStatus.PENDING, message, now, now),
-        )
-        conn.execute(
-            "UPDATE profiles SET login_status=?, updated_at=? WHERE profile_id=?",
-            (LoginStatus.PENDING, now, profile_id),
-        )
+    runtime = None
     try:
+        with get_connection(settings) as conn:
+            conn.execute(
+                """
+                INSERT INTO login_sessions (
+                    login_session_id, profile_id, status, message, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (login_session_id, profile_id, LoginStatus.PENDING, message, now, now),
+            )
+            conn.execute(
+                "UPDATE profiles SET login_status=?, updated_at=? WHERE profile_id=?",
+                (LoginStatus.PENDING, now, profile_id),
+            )
         managed = await BrowserContextManager(settings).open_context(profile_id)
         page = await managed.context.new_page()
         await page.set_viewport_size({"width": 520, "height": 720})
@@ -217,9 +234,9 @@ async def start_login(
             settings=settings,
             expires_at_monotonic=time.monotonic() + settings.login_session_timeout_seconds,
         )
-        runtime.task = asyncio.create_task(_watch_login_session(runtime))
         async with _login_runtime_lock():
             _LOGIN_RUNTIMES[login_session_id] = runtime
+        runtime.task = asyncio.create_task(_watch_login_session(runtime))
         qr_sha256 = _sha256_file(qr_path) if qr_path.exists() else None
         return {
             "login_session_id": login_session_id,
@@ -229,16 +246,33 @@ async def start_login(
             "qr_image_sha256": qr_sha256,
             "expires_in_seconds": settings.login_session_timeout_seconds,
         }
-    except Exception:
+    except BaseException:
+        if runtime is not None:
+            async with _login_runtime_lock():
+                _LOGIN_RUNTIMES.pop(login_session_id, None)
+            if runtime.task is not None:
+                runtime.task.cancel()
+                await asyncio.gather(runtime.task, return_exceptions=True)
         if managed is not None:
-            await managed.close()
+            with contextlib.suppress(Exception):
+                await managed.close()
         release_profile_lock(profile_id, lock_id, settings)
-        _update_login_session(
-            login_session_id,
-            LoginStatus.LOGGED_OUT,
-            "QR login start failed; no cookies or QR token internals were returned",
-            settings,
-        )
+        _remove_qr_artifacts(profile_id, login_session_id, settings)
+        with contextlib.suppress(Exception):
+            update_login_metadata(
+                profile_id,
+                logged_in=False,
+                bili_uid=None,
+                nickname=None,
+                settings=settings,
+            )
+        with contextlib.suppress(Exception):
+            _update_login_session(
+                login_session_id,
+                LoginStatus.LOGGED_OUT,
+                "QR login start failed; no cookies or QR token internals were returned",
+                settings,
+            )
         raise
 
 
@@ -254,11 +288,15 @@ def get_login_qr_image_path(
     validate_login_session_id(login_session_id)
     with get_connection(settings) as conn:
         row = conn.execute(
-            "SELECT profile_id FROM login_sessions WHERE login_session_id=?",
+            "SELECT profile_id, status, created_at FROM login_sessions WHERE login_session_id=?",
             (login_session_id,),
         ).fetchone()
     if not row or row["profile_id"] != profile_id:
         raise ProfileNotFoundError("login session not found")
+    if row["status"] != LoginStatus.PENDING or _login_session_expired(
+        row["created_at"], settings.login_session_timeout_seconds
+    ):
+        raise FileNotFoundError("login QR is no longer available")
     path = profile_storage_dir(profile_id, settings) / "login_sessions" / login_session_id / "qr.png"
     resolved = path.resolve()
     profile_root = profile_storage_dir(profile_id, settings).resolve()
@@ -317,6 +355,58 @@ def _login_runtime_lock() -> asyncio.Lock:
     return _LOGIN_RUNTIME_LOCK
 
 
+async def shutdown_login_runtimes() -> None:
+    """Cancel pending login watchers so their finally blocks close browser profiles."""
+    async with _login_runtime_lock():
+        tasks = [
+            runtime.task
+            for runtime in _LOGIN_RUNTIMES.values()
+            if runtime.task is not None and not runtime.task.done()
+        ]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def recover_stale_login_sessions(settings: Settings | None = None) -> dict[str, int]:
+    """Expire pending QR sessions left behind by a previous kernel process."""
+    settings = settings or get_settings()
+    now = utc_now_iso()
+    with get_connection(settings) as conn:
+        rows = conn.execute(
+            "SELECT login_session_id, profile_id, created_at FROM login_sessions WHERE status=?",
+            (LoginStatus.PENDING,),
+        ).fetchall()
+        # No watcher can be restored across a process restart.  Treat all
+        # persisted pending sessions as stale so their QR cannot linger.
+        stale = [
+            (str(row["login_session_id"]), str(row["profile_id"]))
+            for row in rows
+        ]
+        for login_session_id, profile_id in stale:
+            conn.execute(
+                "UPDATE login_sessions SET status=?, message=?, updated_at=? WHERE login_session_id=?",
+                (
+                    "expired",
+                    "QR login session expired; start a new login session for a fresh QR image",
+                    now,
+                    login_session_id,
+                ),
+            )
+            conn.execute(
+                "UPDATE profiles SET login_status=?, updated_at=? WHERE profile_id=? AND login_status=?",
+                (LoginStatus.UNKNOWN, now, profile_id, LoginStatus.PENDING),
+            )
+            conn.execute(
+                "UPDATE profiles SET active_job_id=NULL, updated_at=? WHERE profile_id=? AND active_job_id=?",
+                (now, profile_id, f"login_{login_session_id}"),
+            )
+    for login_session_id, profile_id in stale:
+        _remove_qr_artifacts(profile_id, login_session_id, settings)
+    return {"login_sessions_expired": len(stale)}
+
+
 async def _watch_login_session(runtime: LoginRuntime) -> None:
     refresh_at = time.monotonic() + runtime.settings.login_qr_refresh_seconds
     try:
@@ -361,7 +451,26 @@ async def _watch_login_session(runtime: LoginRuntime) -> None:
             "QR login session expired; start a new login session for a fresh QR image",
             runtime.settings,
         )
+    except Exception:
+        # Network/browser failures must not leave an apparently active QR or a
+        # permanently pending profile behind.  The raw exception is not
+        # persisted because it may contain request details or headers.
+        update_login_metadata(
+            runtime.profile_id,
+            logged_in=False,
+            bili_uid=None,
+            nickname=None,
+            settings=runtime.settings,
+        )
+        _update_login_session(
+            runtime.login_session_id,
+            LoginStatus.LOGGED_OUT,
+            "QR login verification failed; start a new login session",
+            runtime.settings,
+        )
     finally:
+        _expire_pending_login_runtime(runtime)
+        _remove_qr_artifacts(runtime.profile_id, runtime.login_session_id, runtime.settings)
         with contextlib.suppress(Exception):
             await runtime.managed.close()
         release_profile_lock(runtime.profile_id, runtime.lock_id, runtime.settings)
@@ -407,6 +516,56 @@ def _update_login_session(
         )
 
 
+def _login_session_expired(created_at: object, timeout_seconds: int) -> bool:
+    try:
+        created = datetime.fromisoformat(str(created_at))
+    except (TypeError, ValueError):
+        return True
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=UTC)
+    return datetime.now(UTC) >= created.astimezone(UTC) + timedelta(seconds=max(1, timeout_seconds))
+
+
+def _remove_qr_artifacts(profile_id: str, login_session_id: str, settings: Settings) -> None:
+    """Delete only the QR session directory inside the profile-owned root."""
+    try:
+        validate_profile_id(profile_id)
+        validate_login_session_id(login_session_id)
+        profile_root = profile_storage_dir(profile_id, settings).resolve()
+        qr_dir = (profile_root / "login_sessions" / login_session_id).resolve()
+        if profile_root not in qr_dir.parents:
+            return
+        shutil.rmtree(qr_dir, ignore_errors=True)
+    except (OSError, ValueError):
+        return
+
+
+def _expire_pending_login_runtime(runtime: LoginRuntime) -> None:
+    """Make cancellation/abnormal watcher exits terminal before cleanup."""
+    try:
+        with get_connection(runtime.settings) as conn:
+            row = conn.execute(
+                "SELECT status FROM login_sessions WHERE login_session_id=?",
+                (runtime.login_session_id,),
+            ).fetchone()
+        if row and row["status"] == LoginStatus.PENDING:
+            update_login_metadata(
+                runtime.profile_id,
+                logged_in=False,
+                bili_uid=None,
+                nickname=None,
+                settings=runtime.settings,
+            )
+            _update_login_session(
+                runtime.login_session_id,
+                "expired",
+                "QR login session ended; start a new login session",
+                runtime.settings,
+            )
+    except Exception:
+        return
+
+
 def _qr_image_url(profile_id: str, login_session_id: str, external_owner_id: str) -> str:
     return (
         f"/v1/profiles/{quote(profile_id)}/login/{quote(login_session_id)}/qr.png"
@@ -426,10 +585,12 @@ def parse_cookie_import(format_name: str, payload: Any) -> tuple[list[dict[str, 
     if format_name == "cookie_header":
         if not isinstance(payload, str):
             raise CookieImportError("cookie_header import requires string cookie content")
+        _ensure_text_size(payload)
         return _parse_cookie_header(payload), []
     if format_name == "netscape":
         if not isinstance(payload, str):
             raise CookieImportError("netscape import requires string cookie content")
+        _ensure_text_size(payload)
         return _parse_netscape_cookie_file(payload), []
     if format_name == "json":
         parsed = _loads_if_json_string(payload)
@@ -498,18 +659,54 @@ async def import_cookies_to_profile(
             f"cookie import failed inside browser context: {sanitize_text(type(exc).__name__)}"
         ) from exc
     finally:
-        if managed is not None:
-            await managed.close()
-        release_profile_lock(profile_id, lock_id, settings)
+        try:
+            if managed is not None:
+                await managed.close()
+        finally:
+            release_profile_lock(profile_id, lock_id, settings)
 
 
 def _loads_if_json_string(payload: Any) -> Any:
     if isinstance(payload, str):
+        _ensure_text_size(payload)
         try:
-            return json.loads(payload)
+            parsed = json.loads(payload)
         except json.JSONDecodeError as exc:
             raise CookieImportError("JSON cookie import payload is invalid JSON") from exc
+        _validate_import_structure(parsed)
+        return parsed
+    _validate_import_structure(payload)
     return payload
+
+
+def _ensure_text_size(value: str) -> None:
+    if len(value.encode("utf-8", errors="ignore")) > MAX_COOKIE_IMPORT_PAYLOAD_BYTES:
+        raise CookieImportError("cookie import payload exceeds the maximum size")
+
+
+def _validate_import_structure(value: Any, *, depth: int = 0, budget: list[int] | None = None) -> None:
+    if budget is None:
+        budget = [0]
+    if depth > 8:
+        raise CookieImportError("cookie import payload nesting is too deep")
+    if isinstance(value, str):
+        size = len(value.encode("utf-8", errors="ignore"))
+        budget[0] += size
+        if budget[0] > MAX_COOKIE_IMPORT_PAYLOAD_BYTES:
+            raise CookieImportError("cookie import payload exceeds the maximum size")
+    elif isinstance(value, list):
+        if len(value) > max(MAX_COOKIE_ENTRIES, MAX_STORAGE_ORIGINS):
+            raise CookieImportError("cookie import contains too many entries")
+        for item in value:
+            _validate_import_structure(item, depth=depth + 1, budget=budget)
+    elif isinstance(value, dict):
+        if len(value) > MAX_COOKIE_ENTRIES:
+            raise CookieImportError("cookie import object contains too many fields")
+        for key, item in value.items():
+            _validate_import_structure(str(key), depth=depth + 1, budget=budget)
+            _validate_import_structure(item, depth=depth + 1, budget=budget)
+    elif value is not None and not isinstance(value, (bool, int, float)):
+        raise CookieImportError("cookie import payload contains an unsupported value")
 
 
 def _parse_netscape_cookie_file(text: str) -> list[dict[str, Any]]:
@@ -538,6 +735,8 @@ def _parse_netscape_cookie_file(text: str) -> list[dict[str, Any]]:
                 }
             )
         )
+        if len(cookies) > MAX_COOKIE_ENTRIES:
+            raise CookieImportError("cookie import contains too many cookies")
     return cookies
 
 
@@ -564,6 +763,8 @@ def _parse_cookie_header(text: str) -> list[dict[str, Any]]:
                 }
             )
         )
+        if len(cookies) > MAX_COOKIE_ENTRIES:
+            raise CookieImportError("cookie import contains too many cookies")
     if not cookies:
         raise CookieImportError("cookie_header import did not contain any cookies")
     return cookies
@@ -590,6 +791,8 @@ def _parse_json_cookies(payload: Any) -> list[dict[str, Any]]:
         raise CookieImportError("json cookie import requires an object or list")
 
     cookies = []
+    if len(payload) > MAX_COOKIE_ENTRIES:
+        raise CookieImportError("cookie import contains too many cookies")
     for item in payload:
         if not isinstance(item, dict):
             raise CookieImportError("cookie entries must be JSON objects")
@@ -604,11 +807,21 @@ def _normalize_cookie(item: dict[str, Any]) -> dict[str, Any]:
         raise CookieImportError("cookie entry missing name")
     if value == "":
         raise CookieImportError("cookie entry missing value")
+    if len(name) > MAX_COOKIE_NAME_LENGTH:
+        raise CookieImportError("cookie name is too long")
+    if len(value.encode("utf-8", errors="ignore")) > MAX_COOKIE_VALUE_LENGTH:
+        raise CookieImportError("cookie value is too long")
+
+    path = str(item.get("path") or "/")
+    if not path.startswith("/"):
+        raise CookieImportError("cookie path must start with /")
+    if len(path) > MAX_COOKIE_PATH_LENGTH:
+        raise CookieImportError("cookie path is too long")
 
     cookie: dict[str, Any] = {
         "name": name,
         "value": value,
-        "path": str(item.get("path") or "/"),
+        "path": path,
         "secure": bool(item.get("secure", True)),
         "httpOnly": bool(item.get("httpOnly") or item.get("http_only") or False),
     }
@@ -620,10 +833,14 @@ def _normalize_cookie(item: dict[str, Any]) -> dict[str, Any]:
     domain = item.get("domain") or item.get("host")
     if url:
         parsed = urlparse(str(url))
-        if parsed.scheme and parsed.netloc:
-            cookie["url"] = f"{parsed.scheme}://{parsed.netloc}"
+        if parsed.scheme not in {"http", "https"} or not is_bilibili_host(parsed.hostname):
+            raise CookieImportError("cookie URL must use a Bilibili host")
+        cookie["url"] = f"{parsed.scheme}://{parsed.hostname}"
     elif domain:
-        cookie["domain"] = str(domain)
+        normalized_domain = str(domain).strip().lower().lstrip(".")
+        if not is_bilibili_host(normalized_domain):
+            raise CookieImportError("cookie domain must be bilibili.com or a subdomain")
+        cookie["domain"] = f".{normalized_domain}" if str(domain).strip().startswith(".") else normalized_domain
     else:
         cookie["domain"] = ".bilibili.com"
 
@@ -647,20 +864,41 @@ def _parse_expires(value: Any) -> int | None:
 def _parse_storage_state_origins(payload: Any) -> list[dict[str, Any]]:
     if not isinstance(payload, list):
         raise CookieImportError("storage_state origins must be a list")
+    if len(payload) > MAX_STORAGE_ORIGINS:
+        raise CookieImportError("storage_state contains too many origins")
     origins: list[dict[str, Any]] = []
+    total_storage_bytes = 0
     for origin in payload:
         if not isinstance(origin, dict):
             raise CookieImportError("storage_state origin entries must be objects")
         origin_url = str(origin.get("origin") or "")
         parsed = urlparse(origin_url)
-        if not parsed.scheme or not parsed.netloc:
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             continue
-        if not parsed.netloc.endswith("bilibili.com"):
+        if not is_bilibili_host(parsed.hostname):
             continue
         local_storage = origin.get("localStorage") or []
         if not isinstance(local_storage, list):
             raise CookieImportError("storage_state localStorage must be a list")
-        origins.append({"origin": f"{parsed.scheme}://{parsed.netloc}", "localStorage": local_storage})
+        if len(local_storage) > MAX_LOCAL_STORAGE_ENTRIES:
+            raise CookieImportError("storage_state origin contains too many localStorage entries")
+        normalized_storage: list[dict[str, str]] = []
+        for item in local_storage:
+            if not isinstance(item, dict):
+                raise CookieImportError("storage_state localStorage entries must be objects")
+            key = str(item.get("name") or item.get("key") or "")
+            value = str(item.get("value") or "")
+            if not key:
+                continue
+            if len(key) > MAX_LOCAL_STORAGE_KEY_LENGTH:
+                raise CookieImportError("storage_state localStorage key is too long")
+            if len(value.encode("utf-8", errors="ignore")) > MAX_LOCAL_STORAGE_VALUE_LENGTH:
+                raise CookieImportError("storage_state localStorage value is too long")
+            total_storage_bytes += len(key.encode("utf-8")) + len(value.encode("utf-8"))
+            if total_storage_bytes > MAX_LOCAL_STORAGE_TOTAL_BYTES:
+                raise CookieImportError("storage_state localStorage payload is too large")
+            normalized_storage.append({"name": key, "value": value})
+        origins.append({"origin": f"{parsed.scheme}://{parsed.hostname}", "localStorage": normalized_storage})
     return origins
 
 

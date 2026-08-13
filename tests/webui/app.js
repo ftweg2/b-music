@@ -266,7 +266,8 @@ async function submitJob() {
 
 async function pollJob() {
   try {
-    show("jobResult", await apiFetch(`/v1/jobs/${encodeURIComponent(jobId())}`));
+    const query = new URLSearchParams({ external_owner_id: ownerId() });
+    show("jobResult", await apiFetch(`/v1/jobs/${encodeURIComponent(jobId())}?${query}`));
   } catch (error) {
     showError("jobResult", error);
   }
@@ -274,7 +275,8 @@ async function pollJob() {
 
 async function listArtifacts() {
   try {
-    const payload = await apiFetch(`/v1/jobs/${encodeURIComponent(jobId())}/artifacts`);
+    const query = new URLSearchParams({ external_owner_id: ownerId() });
+    const payload = await apiFetch(`/v1/jobs/${encodeURIComponent(jobId())}/artifacts?${query}`);
     const rows = (payload.artifacts || []).map((artifact) => ({
       ...artifact,
       size_label: formatBytes(artifact.size_bytes)
@@ -289,7 +291,7 @@ async function listArtifacts() {
         { key: "download", label: "下载" }
       ],
       rows,
-      (row) => `${baseUrl()}/v1/jobs/${encodeURIComponent(jobId())}/artifacts/${encodeURIComponent(row.name)}`
+      (row) => `${baseUrl()}/v1/jobs/${encodeURIComponent(jobId())}/artifacts/${encodeURIComponent(row.name)}?external_owner_id=${encodeURIComponent(ownerId())}`
     );
   } catch (error) {
     showError("artifactResult", error);

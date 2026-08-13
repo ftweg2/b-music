@@ -17,6 +17,7 @@
     capturedCount: 0,
     errors: []
   };
+  let nextSegmentOrder = 0;
 
   function rememberError(stage, error) {
     const errors = window.__BILI_CTF_AUDIO_MSE_STATS__.errors;
@@ -104,8 +105,6 @@
       }
 
       const originalAppendBuffer = sourceBuffer.appendBuffer;
-      let order = 0;
-
       sourceBuffer.appendBuffer = function (bufferSource) {
         try {
           window.__BILI_CTF_AUDIO_MSE_STATS__.appendCount += 1;
@@ -114,7 +113,7 @@
             window.__BILI_CTF_AUDIO_MSE_STATS__.capturedCount += 1;
             window.__biliCtfAudioSegment({
               mimeType: String(mimeType || ""),
-              order: order++,
+              order: nextSegmentOrder++,
               size: copy.byteLength || 0,
               dataBase64: toBase64(copy)
             });

@@ -1,18 +1,30 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import time
+from pathlib import Path
 from pathlib import PurePosixPath
 from urllib.parse import urlencode, urlparse
+
+import httpx
 
 from app.bilibili.bvid import normalize_video_url, parse_bvid
 from app.bilibili.playurl import select_best_audio
 from app.bilibili.wbi import MIXIN_KEY_ENC_TAB
 from app.browser.context_manager import BrowserContextManager
 from app.browser.network_capture import MediaCandidate, NetworkCapture
+from app.media_pipeline import ffprobe_json
 from app.models import StrategyName
 from app.security import sanitize_text
-from app.strategies.base import StrategyContext, StrategyResult
+from app.strategies.base import StrategyCancelled, StrategyContext, StrategyResult
+
+
+DOWNLOAD_CHUNK_SIZE = 1024 * 1024
+
+
+class MediaDownloadError(RuntimeError):
+    pass
 
 
 class BrowserNetworkStrategy:
@@ -27,6 +39,7 @@ class BrowserNetworkStrategy:
         raw_path = context.job_dir / "raw.m4s"
         manager = BrowserContextManager(context.settings)
         managed = None
+        capture = None
 
         try:
             video_url = normalize_video_url(context.url)
@@ -41,7 +54,13 @@ class BrowserNetworkStrategy:
                 timeout=int(context.settings.request_timeout_seconds * 1000),
             )
             await _trigger_player_load(page)
-            await page.wait_for_timeout(context.settings.network_capture_ms)
+            await _wait_with_cancellation(
+                page,
+                context.settings.network_capture_ms,
+                context,
+            )
+            await capture.finish()
+            context.raise_if_cancelled()
 
             candidate = capture.best_candidate()
             if not candidate:
@@ -63,26 +82,18 @@ class BrowserNetworkStrategy:
                         },
                     )
 
-            response = await managed.context.request.get(
+            await _download_candidate(
+                managed.context,
                 candidate.actual_url,
+                raw_path,
                 headers={
                     "referer": video_url,
                     "user-agent": context.settings.bilibili_user_agent,
                 },
                 timeout=int(context.settings.request_timeout_seconds * 1000),
+                context=context,
             )
-            if response.status not in {200, 206}:
-                return StrategyResult.failed(
-                    failure_code="AUDIO_DOWNLOAD_FAILED",
-                    reason=f"captured media download HTTP {response.status}",
-                    timings={"duration_ms": _elapsed_ms(started)},
-                    sanitized_debug_info={
-                        "capture": capture.sanitized_summary(),
-                        "candidate": candidate.sanitized_dict(),
-                    },
-                )
-            body = await response.body()
-            if not body:
+            if not raw_path.exists() or raw_path.stat().st_size == 0:
                 return StrategyResult.failed(
                     failure_code="AUDIO_DOWNLOAD_FAILED",
                     reason="captured media response body was empty",
@@ -92,8 +103,39 @@ class BrowserNetworkStrategy:
                         "candidate": candidate.sanitized_dict(),
                     },
                 )
-            raw_path.write_bytes(body)
-
+            probe, probe_warning = await asyncio.to_thread(
+                ffprobe_json,
+                raw_path,
+                context.cancel_requested,
+            )
+            context.raise_if_cancelled()
+            probe_summary = _audio_probe_summary(probe)
+            if probe_warning or not probe_summary["has_audio"] or probe_summary["has_video"]:
+                try:
+                    raw_path.unlink()
+                except FileNotFoundError:
+                    pass
+                failure_code = (
+                    "AUDIO_VALIDATION_FAILED"
+                    if probe_warning
+                    else "CAPTURED_MEDIA_NOT_AUDIO"
+                )
+                reason = (
+                    "Downloaded media could not be validated as audio"
+                    if probe_warning
+                    else "Captured media candidate was not an audio-only stream"
+                )
+                return StrategyResult.failed(
+                    failure_code=failure_code,
+                    reason=reason,
+                    timings={"duration_ms": _elapsed_ms(started)},
+                    sanitized_debug_info={
+                        "capture": capture.sanitized_summary(),
+                        "candidate": candidate.sanitized_dict(),
+                        "probe": probe_summary,
+                        "probe_warning": sanitize_text(probe_warning) if probe_warning else None,
+                    },
+                )
             return StrategyResult.succeeded(
                 reason="Downloaded original media candidate from authenticated BrowserContext",
                 selected_media=candidate.sanitized_dict(),
@@ -106,6 +148,17 @@ class BrowserNetworkStrategy:
                     "raw_size_bytes": raw_path.stat().st_size,
                 },
             )
+        except StrategyCancelled:
+            raise
+        except MediaDownloadError as exc:
+            return StrategyResult.failed(
+                failure_code="AUDIO_DOWNLOAD_FAILED",
+                reason=sanitize_text(exc),
+                timings={"duration_ms": _elapsed_ms(started)},
+                sanitized_debug_info={
+                    "capture": capture.sanitized_summary() if capture else {},
+                },
+            )
         except Exception as exc:
             return StrategyResult.failed(
                 failure_code="BROWSER_NETWORK_FAILED",
@@ -113,12 +166,149 @@ class BrowserNetworkStrategy:
                 timings={"duration_ms": _elapsed_ms(started)},
             )
         finally:
+            if capture is not None:
+                try:
+                    await capture.finish()
+                except Exception:
+                    pass
             if managed is not None:
-                await managed.close()
+                try:
+                    await managed.close()
+                except Exception:
+                    pass
 
 
 def _elapsed_ms(started: float) -> int:
     return int((time.perf_counter() - started) * 1000)
+
+
+def _audio_probe_summary(probe: dict[str, object] | None) -> dict[str, object]:
+    """Return only the non-sensitive stream facts needed to validate a capture."""
+    streams = probe.get("streams") if isinstance(probe, dict) else None
+    stream_items = streams if isinstance(streams, list) else []
+    codec_types: list[str] = []
+    audio_codecs: list[str] = []
+    video_codecs: list[str] = []
+    for stream in stream_items:
+        if not isinstance(stream, dict):
+            continue
+        codec_type = str(stream.get("codec_type") or "").lower()
+        codec_name = str(stream.get("codec_name") or "").lower()
+        if codec_type:
+            codec_types.append(codec_type)
+        if codec_type == "audio" and codec_name:
+            audio_codecs.append(codec_name)
+        elif codec_type == "video" and codec_name:
+            video_codecs.append(codec_name)
+    return {
+        "has_audio": "audio" in codec_types,
+        "has_video": "video" in codec_types,
+        "codec_types": sorted(set(codec_types)),
+        "audio_codecs": sorted(set(audio_codecs)),
+        "video_codecs": sorted(set(video_codecs)),
+    }
+
+
+async def _wait_with_cancellation(
+    page: object,
+    wait_ms: int,
+    context: StrategyContext,
+) -> None:
+    remaining = max(0, wait_ms)
+    while remaining > 0:
+        context.raise_if_cancelled()
+        interval = min(500, remaining)
+        await page.wait_for_timeout(interval)
+        remaining -= interval
+
+
+async def _download_candidate(
+    browser_context: object,
+    url: str,
+    output_path: Path,
+    *,
+    headers: dict[str, str],
+    timeout: int,
+    context: StrategyContext,
+) -> None:
+    temp_path = output_path.with_name(f".{output_path.name}.download")
+    cookie_jar = httpx.Cookies()
+    try:
+        for cookie in await browser_context.cookies([url]):
+            cookie_jar.set(
+                str(cookie["name"]),
+                str(cookie["value"]),
+                domain=str(cookie.get("domain") or ""),
+                path=str(cookie.get("path") or "/"),
+            )
+        request_headers = {**headers, "accept-encoding": "identity"}
+        timeout_seconds = max(0.001, timeout / 1000)
+        written = 0
+        async with httpx.AsyncClient(
+            cookies=cookie_jar,
+            follow_redirects=True,
+            timeout=httpx.Timeout(timeout_seconds),
+        ) as client:
+            async with client.stream("GET", url, headers=request_headers) as response:
+                if response.status_code not in {200, 206}:
+                    raise MediaDownloadError(
+                        f"captured media download HTTP {response.status_code}"
+                    )
+                expected = _content_length(response.headers.get("content-length"))
+                if response.status_code == 206:
+                    content_range = _content_range(response.headers.get("content-range"))
+                    if (
+                        content_range is None
+                        or content_range[0] != 0
+                        or content_range[1] + 1 != content_range[2]
+                    ):
+                        raise MediaDownloadError(
+                            "captured partial response did not contain the full representation"
+                        )
+                    expected = content_range[1] - content_range[0] + 1
+                with temp_path.open("wb") as handle:
+                    async for chunk in response.aiter_raw(chunk_size=DOWNLOAD_CHUNK_SIZE):
+                        context.raise_if_cancelled()
+                        if chunk:
+                            handle.write(chunk)
+                            written += len(chunk)
+                if expected is not None and written != expected:
+                    raise MediaDownloadError(
+                        f"captured media size mismatch: expected {expected}, received {written}"
+                    )
+        if written == 0:
+            raise MediaDownloadError("captured media response body was empty")
+        temp_path.replace(output_path)
+    finally:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _content_length(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError:
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _content_range(value: str | None) -> tuple[int, int, int] | None:
+    if not value:
+        return None
+    try:
+        unit_and_range, total_text = value.split("/", 1)
+        unit, byte_range = unit_and_range.split(" ", 1)
+        start_text, end_text = byte_range.split("-", 1)
+        start, end, total = int(start_text), int(end_text), int(total_text)
+    except ValueError:
+        return None
+    if unit.lower() != "bytes" or start < 0 or end < start or total <= end:
+        return None
+    return start, end, total
 
 
 async def _trigger_player_load(page: object) -> None:

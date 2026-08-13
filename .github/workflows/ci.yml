@@ -55,3 +55,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker compose -f kernel/docker-compose.yml config --quiet
+
+  container-smoke:
+    name: Kernel container smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build kernel image
+        run: docker build --tag b-music-kernel:ci kernel
+      - name: Start kernel container
+        run: docker run --detach --rm --name b-music-kernel-ci --publish 127.0.0.1:8000:8000 b-music-kernel:ci
+      - name: Wait for health
+        shell: bash
+        run: |
+          for attempt in {1..30}; do
+            if curl --fail --silent --show-error http://127.0.0.1:8000/health; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs b-music-kernel-ci
+          exit 1
+      - name: Stop kernel container
+        if: always()
+        run: docker stop b-music-kernel-ci || true

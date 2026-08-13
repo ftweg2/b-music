@@ -64,16 +64,20 @@ export async function submitKernelAudioJob(input: {
   });
 }
 
-export async function getKernelJob(jobId: string): Promise<KernelJobStatus> {
-  return readKernelJson<KernelJobStatus>(`/v1/jobs/${encodeURIComponent(jobId)}`);
+export async function getKernelJob(jobId: string, externalOwnerId: string): Promise<KernelJobStatus> {
+  return readKernelJson<KernelJobStatus>(
+    `/v1/jobs/${encodeURIComponent(jobId)}?external_owner_id=${encodeURIComponent(externalOwnerId)}`
+  );
 }
 
-export async function listKernelArtifacts(jobId: string): Promise<KernelArtifactList> {
-  return readKernelJson<KernelArtifactList>(`/v1/jobs/${encodeURIComponent(jobId)}/artifacts`);
+export async function listKernelArtifacts(jobId: string, externalOwnerId: string): Promise<KernelArtifactList> {
+  return readKernelJson<KernelArtifactList>(
+    `/v1/jobs/${encodeURIComponent(jobId)}/artifacts?external_owner_id=${encodeURIComponent(externalOwnerId)}`
+  );
 }
 
-export function kernelArtifactUrl(jobId: string, artifactName: string): string {
-  return `${kernelBaseUrl()}/v1/jobs/${encodeURIComponent(jobId)}/artifacts/${encodeURIComponent(artifactName)}`;
+export function kernelArtifactUrl(jobId: string, artifactName: string, externalOwnerId: string): string {
+  return `${kernelBaseUrl()}/v1/jobs/${encodeURIComponent(jobId)}/artifacts/${encodeURIComponent(artifactName)}?external_owner_id=${encodeURIComponent(externalOwnerId)}`;
 }
 
 export async function readKernelJson<T>(path: string, init?: RequestInit): Promise<T> {

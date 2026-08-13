@@ -1,9 +1,11 @@
 import hashlib
 import json
 
+import pytest
+
 from app.artifact_manager import build_artifact_record, write_artifact_manifest
-from app.profile_manager import parse_cookie_import
-from app.security import sanitize_dict, sanitize_text, sanitize_url
+from app.profile_manager import CookieImportError, parse_cookie_import
+from app.security import sanitize_dict, sanitize_text, sanitize_url, sanitize_value
 
 
 def test_artifact_record_includes_sha256(tmp_path) -> None:
@@ -57,6 +59,44 @@ def test_parse_playwright_storage_state_filters_non_bilibili_origins() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "domain",
+    ["example.com", "evilbilibili.com", "bilibili.com.evil.test"],
+)
+def test_cookie_import_rejects_non_bilibili_domains(domain: str) -> None:
+    with pytest.raises(CookieImportError, match="cookie domain"):
+        parse_cookie_import(
+            "json",
+            [{"name": "SESSDATA", "value": "fake-value", "domain": domain}],
+        )
+
+
+def test_cookie_import_accepts_bilibili_subdomain() -> None:
+    cookies, _origins = parse_cookie_import(
+        "json",
+        [{"name": "SESSDATA", "value": "fake-value", "domain": ".passport.bilibili.com"}],
+    )
+
+    assert cookies[0]["domain"] == ".passport.bilibili.com"
+
+
+def test_storage_state_does_not_accept_suffix_confusion_host() -> None:
+    _cookies, origins = parse_cookie_import(
+        "playwright_storage_state",
+        {
+            "cookies": [],
+            "origins": [
+                {
+                    "origin": "https://evilbilibili.com",
+                    "localStorage": [{"name": "secret", "value": "fake"}],
+                }
+            ],
+        },
+    )
+
+    assert origins == []
+
+
 def test_sanitize_text_redacts_sensitive_headers() -> None:
     text = "Cookie=SESSDATA=fake-secret Authorization=Bearer fake-token"
 
@@ -65,6 +105,16 @@ def test_sanitize_text_redacts_sensitive_headers() -> None:
     assert "fake-secret" not in sanitized
     assert "fake-token" not in sanitized
     assert "<redacted>" in sanitized
+
+
+def test_sanitize_text_redacts_space_separated_sensitive_headers() -> None:
+    sanitized = sanitize_text(
+        "Authorization Bearer fake-token; Cookie SESSDATA=fake-secret; Set-Cookie sid=fake"
+    )
+
+    assert "fake-token" not in sanitized
+    assert "fake-secret" not in sanitized
+    assert "sid=fake" not in sanitized
 
 
 def test_sanitize_dict_redacts_sensitive_keys() -> None:
@@ -90,3 +140,25 @@ def test_sanitize_url_removes_signed_query() -> None:
 
     assert "fake-secret" not in sanitized
     assert sanitized == "https://example.bilivideo.com/audio.m4s?<redacted>"
+
+
+def test_sanitize_url_removes_userinfo() -> None:
+    sanitized = sanitize_url("https://user:fake-password@example.com/audio.m4s?token=fake")
+
+    assert sanitized == "https://example.com/audio.m4s?<redacted>"
+    assert "fake-password" not in sanitized
+
+
+def test_sanitize_text_redacts_repr_style_sensitive_values() -> None:
+    sanitized = sanitize_text("Headers({'Cookie': 'SESSDATA=fake-secret'})")
+
+    assert "fake-secret" not in sanitized
+
+
+def test_sanitize_value_redacts_sensitive_ffprobe_tags() -> None:
+    sanitized = sanitize_value(
+        {"format": {"tags": {"Cookie": "SESSDATA=fake-secret", "title": "audio"}}}
+    )
+
+    assert sanitized["format"]["tags"]["Cookie"] == "<redacted>"
+    assert sanitized["format"]["tags"]["title"] == "audio"

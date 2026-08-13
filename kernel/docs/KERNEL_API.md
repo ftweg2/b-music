@@ -37,7 +37,7 @@ Response:
 
 ```http
 POST /v1/profiles/{profile_id}/login/start
-GET /v1/profiles/{profile_id}/login/status
+GET /v1/profiles/{profile_id}/login/status?external_owner_id=user_or_team_123
 ```
 
 Login start opens the normal Bilibili login page inside the kernel-owned profile and returns a QR screenshot URL. It must not return cookies, QR token internals, storage state, localStorage, sessionStorage, browser profile paths, or sensitive headers.
@@ -156,11 +156,20 @@ Force mode:
 ```
 
 ```http
-GET /v1/jobs/{job_id}
+GET /v1/jobs/{job_id}?external_owner_id=user_or_team_123
 POST /v1/jobs/{job_id}/cancel
-GET /v1/jobs/{job_id}/artifacts
-GET /v1/jobs/{job_id}/artifacts/{name}
+GET /v1/jobs/{job_id}/artifacts?external_owner_id=user_or_team_123
+GET /v1/jobs/{job_id}/artifacts/{name}?external_owner_id=user_or_team_123
 ```
+
+Cancellation requires a JSON body containing the owner:
+
+```json
+{"external_owner_id": "user_or_team_123"}
+```
+
+All job status, cancellation, artifact listing, and artifact download requests verify
+`external_owner_id` against the immutable job owner recorded at submission.
 
 ## Metadata Search
 
@@ -275,7 +284,8 @@ POST /v1/diagnostics/cleanup/artifacts
 
 `POST /v1/diagnostics/cleanup/artifacts` runs artifact retention cleanup immediately.
 
-Do not expose diagnostics directly to untrusted clients. It is intended for App backend, operators, or future trusted backend services.
+Diagnostics require `X-Kernel-Operator-Token` matching `KERNEL_OPERATOR_TOKEN`.
+When the token is unset, these endpoints return `503` and remain disabled.
 
 Job states:
 
