@@ -464,7 +464,9 @@ const tests: TestCase[] = [
         scoreBreakdownJson: "{}"
       });
       const track = createOrReuseTrack(candidate, "local");
-      assert.equal(claimTrackPreparation(track.id, "job-one", "local")?.kernelJobId, "job-one");
+      const claimed = claimTrackPreparation(track.id, "job-one", "local", "kernel-owner");
+      assert.equal(claimed?.kernelJobId, "job-one");
+      assert.equal(claimed?.kernelOwnerId, "kernel-owner");
       assert.equal(claimTrackPreparation(track.id, "job-two", "local"), null);
       assert.equal(getTrackByCandidateId(candidate.id, "local")?.kernelJobId, "job-one");
       closeDatabaseForTests();
@@ -505,6 +507,7 @@ const tests: TestCase[] = [
 
       assert.equal(migrated?.id, track.id);
       assert.equal(migrated?.externalOwnerId, "local");
+      assert.equal(migrated?.kernelOwnerId, "local");
       assert.equal(migrated?.kernelJobId, "legacy_job");
       assert.equal(migrated?.artifactName, "audio.m4a");
       assert.equal(migrated?.status, "ready");

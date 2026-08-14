@@ -25,6 +25,18 @@ export type KernelArtifactList = {
   artifacts: KernelArtifact[];
 };
 
+export class KernelRequestError extends Error {
+  readonly status: number | null;
+  readonly retryable: boolean;
+
+  constructor(message: string, status: number | null, retryable: boolean) {
+    super(message);
+    this.name = "KernelRequestError";
+    this.status = status;
+    this.retryable = retryable;
+  }
+}
+
 export function kernelBaseUrl(): string {
   return (process.env.KERNEL_BASE_URL || "http://localhost:8000").replace(/\/+$/, "");
 }
@@ -81,18 +93,31 @@ export function kernelArtifactUrl(jobId: string, artifactName: string, externalO
 }
 
 export async function readKernelJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${kernelBaseUrl()}${path}`, {
-    ...init,
-    cache: "no-store",
-    signal: init?.signal || AbortSignal.timeout(kernelRequestTimeoutMs()),
-    headers: {
-      "content-type": "application/json",
-      ...(init?.headers || {})
-    }
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${kernelBaseUrl()}${path}`, {
+      ...init,
+      cache: "no-store",
+      signal: init?.signal || AbortSignal.timeout(kernelRequestTimeoutMs()),
+      headers: {
+        "content-type": "application/json",
+        ...(init?.headers || {})
+      }
+    });
+  } catch (error) {
+    throw new KernelRequestError(
+      `暂时无法连接音频内核：${error instanceof Error ? error.message : "network error"}`,
+      null,
+      true
+    );
+  }
   const payload = (await response.json().catch(() => ({}))) as { detail?: string; error?: string };
   if (!response.ok) {
-    throw new Error(payload.detail || payload.error || `内核请求失败：HTTP ${response.status}`);
+    throw new KernelRequestError(
+      payload.detail || payload.error || `内核请求失败：HTTP ${response.status}`,
+      response.status,
+      response.status === 408 || response.status === 429 || response.status >= 500
+    );
   }
   return payload as T;
 }

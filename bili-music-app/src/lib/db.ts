@@ -124,6 +124,7 @@ function migrate(db: DatabaseSync): void {
     CREATE TABLE IF NOT EXISTS tracks (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       external_owner_id TEXT NOT NULL DEFAULT 'local',
+      kernel_owner_id TEXT,
       candidate_id INTEGER NOT NULL,
       bvid TEXT NOT NULL,
       title TEXT NOT NULL,
@@ -155,6 +156,10 @@ function migrate(db: DatabaseSync): void {
   ensureColumn(db, "candidate_interactions", "external_owner_id", "TEXT NOT NULL DEFAULT 'local'");
   migrateFavoriteVideosToStableBvid(db);
   migrateTracksToOwners(db);
+  ensureColumn(db, "tracks", "kernel_owner_id", "TEXT");
+  db.exec(`UPDATE tracks
+           SET kernel_owner_id=external_owner_id
+           WHERE kernel_owner_id IS NULL OR kernel_owner_id=''`);
   db.exec("CREATE INDEX IF NOT EXISTS idx_interactions_owner_candidate ON candidate_interactions(external_owner_id, candidate_id);");
   db.exec("CREATE INDEX IF NOT EXISTS idx_favorite_owner_bvid ON favorite_videos(external_owner_id, bvid);");
   db.exec("CREATE INDEX IF NOT EXISTS idx_tracks_candidate ON tracks(candidate_id);");
@@ -424,10 +429,10 @@ export function getOrHydrateFavoriteCandidateByBvid(bvid: string, externalOwnerI
   return candidate;
 }
 
-export function listCandidates(limit: number): CandidateVideo[] {
+export function listCandidates(limit: number, offset = 0): CandidateVideo[] {
   const rows = getDatabase()
-    .prepare("SELECT * FROM candidate_videos WHERE source_provider <> 'mock' ORDER BY updated_at DESC LIMIT ?")
-    .all(limit);
+    .prepare("SELECT * FROM candidate_videos WHERE source_provider <> 'mock' ORDER BY updated_at DESC LIMIT ? OFFSET ?")
+    .all(limit, Math.max(0, offset));
   return rows.map(mapCandidateVideo);
 }
 
@@ -504,7 +509,11 @@ export function deleteFavoriteVideo(candidateId: number, externalOwnerId = "loca
   return result.changes > 0;
 }
 
-export function listFavoriteVideos(limit: number, externalOwnerId = "local"): Array<{ favorite: FavoriteVideo; candidate: CandidateVideo }> {
+export function listFavoriteVideos(
+  limit: number,
+  externalOwnerId = "local",
+  offset = 0
+): Array<{ favorite: FavoriteVideo; candidate: CandidateVideo }> {
   const rows = getDatabase()
     .prepare(
       `SELECT
@@ -533,9 +542,9 @@ export function listFavoriteVideos(limit: number, externalOwnerId = "local"): Ar
        WHERE favorite_videos.external_owner_id = ?
          AND (candidate_videos.id IS NULL OR candidate_videos.source_provider <> 'mock')
        ORDER BY favorite_videos.created_at DESC
-       LIMIT ?`
+       LIMIT ? OFFSET ?`
     )
-    .all(externalOwnerId, limit);
+    .all(externalOwnerId, limit, Math.max(0, offset));
   return rows.map((row) => {
     const favorite = mapFavoriteVideoFromJoin(row);
     const candidate = mapCandidateVideoOrHydrateFavorite(row);
@@ -654,17 +663,52 @@ export function getTrackById(id: number, externalOwnerId = "local"): Track | nul
   return row ? mapTrack(row) : null;
 }
 
-export function claimTrackPreparation(id: number, jobId: string, externalOwnerId = "local"): Track | null {
+export function listTracks(
+  limit: number,
+  externalOwnerId = "local",
+  offset = 0,
+  status?: TrackStatus
+): Track[] {
+  // API list routes may request one sentinel row to calculate hasMore while
+  // still returning at most 100 records to clients.
+  const boundedLimit = Math.max(1, Math.min(101, Math.round(limit)));
+  const boundedOffset = Math.max(0, Math.round(offset));
+  const rows = status
+    ? getDatabase()
+        .prepare(
+          `SELECT * FROM tracks
+           WHERE external_owner_id=? AND status=?
+           ORDER BY updated_at DESC, id DESC
+           LIMIT ? OFFSET ?`
+        )
+        .all(externalOwnerId, status, boundedLimit, boundedOffset)
+    : getDatabase()
+        .prepare(
+          `SELECT * FROM tracks
+           WHERE external_owner_id=?
+           ORDER BY updated_at DESC, id DESC
+           LIMIT ? OFFSET ?`
+        )
+        .all(externalOwnerId, boundedLimit, boundedOffset);
+  return rows.map(mapTrack);
+}
+
+export function claimTrackPreparation(
+  id: number,
+  jobId: string,
+  externalOwnerId = "local",
+  kernelOwnerId = externalOwnerId
+): Track | null {
   const result = getDatabase()
     .prepare(
       `UPDATE tracks
-       SET kernel_job_id=?, artifact_name=NULL, artifact_sha256=NULL,
+       SET kernel_job_id=?, kernel_owner_id=?, artifact_name=NULL, artifact_sha256=NULL,
            artifact_size_bytes=NULL, artifact_mime_type=NULL, status='preparing',
            failure_reason=NULL, expires_at=NULL, updated_at=?
        WHERE id=? AND external_owner_id=?
          AND NOT (status='preparing' AND kernel_job_id IS NOT NULL)`
     )
-    .run(jobId, nowIso(), id, externalOwnerId);
+    .run(jobId, kernelOwnerId, nowIso(), id, externalOwnerId);
   return result.changes === 1 ? getTrackById(id, externalOwnerId) : null;
 }
 
@@ -674,6 +718,7 @@ export function updateTrack(
     Pick<
       Track,
       | "kernelJobId"
+      | "kernelOwnerId"
       | "artifactName"
       | "artifactSha256"
       | "artifactSizeBytes"
@@ -698,13 +743,14 @@ export function updateTrack(
   getDatabase()
     .prepare(
       `UPDATE tracks
-       SET kernel_job_id=?, artifact_name=?, artifact_sha256=?, artifact_size_bytes=?,
+       SET kernel_job_id=?, kernel_owner_id=?, artifact_name=?, artifact_sha256=?, artifact_size_bytes=?,
            artifact_mime_type=?, duration_seconds=?, status=?, failure_reason=?,
            expires_at=?, updated_at=?
         WHERE id=? AND external_owner_id=?`
     )
     .run(
       next.kernelJobId,
+      next.kernelOwnerId,
       next.artifactName,
       next.artifactSha256,
       next.artifactSizeBytes,
@@ -1078,6 +1124,7 @@ function createTracksTable(db: DatabaseSync): void {
     CREATE TABLE IF NOT EXISTS tracks (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       external_owner_id TEXT NOT NULL DEFAULT 'local',
+      kernel_owner_id TEXT,
       candidate_id INTEGER NOT NULL,
       bvid TEXT NOT NULL,
       title TEXT NOT NULL,
@@ -1151,6 +1198,7 @@ function mapTrack(row: unknown): Track {
   return {
     id: Number(read(row, "id")),
     externalOwnerId: String(read(row, "external_owner_id") ?? "local"),
+    kernelOwnerId: String(read(row, "kernel_owner_id") ?? read(row, "external_owner_id") ?? "local"),
     candidateId: Number(read(row, "candidate_id")),
     bvid: String(read(row, "bvid")),
     title: String(read(row, "title")),

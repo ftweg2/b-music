@@ -28,7 +28,7 @@ def get_artifacts(
         raise HTTPException(status_code=400, detail=sanitize_text(exc)) from exc
 
 
-@router.get("/{job_id}/artifacts/{name}")
+@router.api_route("/{job_id}/artifacts/{name}", methods=["GET", "HEAD"])
 def download_artifact(
     job_id: str,
     name: str,
@@ -45,4 +45,16 @@ def download_artifact(
         raise HTTPException(status_code=403, detail=sanitize_text(exc)) from exc
     except (PermissionError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=sanitize_text(exc)) from exc
-    return FileResponse(path, filename=path.name)
+    artifact = next(
+        (item for item in list_artifacts(job_id) if item["name"] == path.name),
+        None,
+    )
+    headers: dict[str, str] = {
+        "Cache-Control": "private, no-store",
+        "X-Content-Type-Options": "nosniff",
+    }
+    if artifact is not None:
+        headers["X-Content-SHA256"] = str(artifact["sha256"])
+        headers["X-File-Size"] = str(artifact["size_bytes"])
+        headers["ETag"] = f'"sha256-{artifact["sha256"]}"'
+    return FileResponse(path, filename=path.name, headers=headers)

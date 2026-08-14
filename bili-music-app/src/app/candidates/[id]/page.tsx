@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
-import { PlayCandidateButton } from "@/components/PlayCandidateButton";
+import { DownloadCandidateButton, PlayCandidateButton } from "@/components/PlayCandidateButton";
 import { RecommendationReasons } from "@/components/RecommendationReasons";
 import { currentAppOwnerId } from "@/lib/appOwner";
 import { favoriteBvids, getCandidateById, listCandidateInteractions } from "@/lib/db";
@@ -39,6 +39,7 @@ export default async function CandidateDetailPage({ params, searchParams }: Prop
           {withScore.isFavorited ? <span className="badge green">已收藏</span> : null}
           {candidate.category ? <span className="badge blue">{candidate.category}</span> : null}
           <PlayCandidateButton candidate={withScore} />
+          <DownloadCandidateButton candidate={withScore} />
           <a className="buttonLink secondary" href={candidate.sourceUrl} target="_blank" rel="noreferrer">
             打开 B 站
           </a>
@@ -71,13 +72,12 @@ export default async function CandidateDetailPage({ params, searchParams }: Prop
         </div>
       </section>
       <section className="panel">
-        <h3 className="panelTitle">后续动作</h3>
-        <p className="note">
-          “用内核准备音频”目前只是占位。后续会在用户确认后，通过 HTTP 调用外部内核。
-        </p>
-        <button type="button" className="secondary" disabled>
-          用内核准备音频
-        </button>
+        <h3 className="panelTitle">播放与离线</h3>
+        <p className="note">播放或下载都会先通过 App API 请求内核准备音频。下载完成后由浏览器或手机系统保存在本机。</p>
+        <div className="row">
+          <PlayCandidateButton candidate={withScore} />
+          <DownloadCandidateButton candidate={withScore} />
+        </div>
       </section>
       <section className="panel">
         <h3 className="panelTitle">互动记录</h3>

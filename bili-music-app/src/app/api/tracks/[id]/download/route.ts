@@ -11,7 +11,7 @@ export async function GET(request: Request, { params }: Params) {
     request,
     trackId: Number(id),
     appOwnerId: await currentAppOwnerId(),
-    disposition: "inline"
+    disposition: "attachment"
   });
 }
 
@@ -21,7 +21,7 @@ export async function HEAD(request: Request, { params }: Params) {
     request,
     trackId: Number(id),
     appOwnerId: await currentAppOwnerId(),
-    disposition: "inline",
+    disposition: "attachment",
     headOnly: true
   });
 }

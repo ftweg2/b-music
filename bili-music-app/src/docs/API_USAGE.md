@@ -1,6 +1,6 @@
 # bili-music-app API 使用文档
 
-最后校准日期：2026-05-16
+最后校准日期：2026-08-14
 
 本文档面向手机 App、网页端、桌面端等客户端，描述它们应该调用的 `bili-music-app` 后端 API。
 
@@ -52,7 +52,8 @@ https://music.example.com
 
 ```json
 {
-  "error": "sanitized error message"
+  "error": "sanitized error message",
+  "code": "可选的机器可读错误码"
 }
 ```
 
@@ -80,13 +81,14 @@ App API 不会返回：
 - kernel artifact 本地路径
 - 音频或视频文件落盘路径
 
-App 存储 metadata，包括候选视频、收藏、关注 UP、track 状态和 artifact 元信息。音频 artifact 留在 kernel，由 App 的 stream 接口代理。
+App 存储 metadata，包括候选视频、收藏、关注 UP、track 状态和 artifact 元信息。音频 artifact 留在 kernel，由 App 的 stream/download 接口直接流式代理给客户端。客户端下载的文件由浏览器或手机系统保存，App 服务器不保存第二份音频。
 
 ## 3. 接口总览
 
 | 模块 | 方法 | 路径 | 用途 |
 | --- | --- | --- | --- |
 | Health | `GET` | `/api/health` | App 健康检查 |
+| Discovery | `GET` | `/api/capabilities` | API 版本、能力与限制发现 |
 | Health | `GET` | `/api/kernel/health` | kernel 健康检查代理 |
 | Login | `GET` | `/api/kernel/login/status` | 查询 Bilibili 登录状态 |
 | Login | `POST` | `/api/kernel/login/start` | 发起 kernel QR 登录 |
@@ -102,10 +104,13 @@ App 存储 metadata，包括候选视频、收藏、关注 UP、track 状态和 
 | Creators | `POST` | `/api/creators` | 添加关注 UP |
 | Creators | `PATCH` | `/api/creators/{id}` | 修改关注 UP |
 | Creators | `DELETE` | `/api/creators/{id}` | 删除关注 UP |
-| Tracks | `POST` | `/api/tracks/prepare` | 准备播放 |
+| Tracks | `GET` | `/api/tracks` | 恢复/分页查询 Track 任务 |
+| Tracks | `POST` | `/api/tracks/prepare` | 准备播放或下载 |
+| Tracks | `POST` | `/api/tracks/status` | 批量查询最多 20 个 Track |
 | Tracks | `GET` | `/api/tracks/{id}` | 查询播放准备状态 |
 | Tracks | `POST` | `/api/tracks/{id}/refresh` | 强制重新准备 |
-| Tracks | `GET` | `/api/tracks/{id}/stream` | 音频流 |
+| Tracks | `GET`/`HEAD` | `/api/tracks/{id}/stream` | 音频流 |
+| Tracks | `GET`/`HEAD` | `/api/tracks/{id}/download` | 客户端离线下载 |
 | Recommendations | `GET` | `/api/recommendations` | 收藏视图/推荐视图 |
 | Image | `GET` | `/api/image-proxy` | Bilibili 封面图片代理 |
 | Diagnostics | `GET` | `/api/diagnostics` | 数据健康诊断 |
@@ -545,7 +550,7 @@ curl "{BASE_URL}/api/candidates/123"
 
 ### GET `/api/favorites`
 
-获取收藏列表，最多 100 条。
+获取收藏列表。支持 `limit`（1-100，默认 100）和 `offset`。
 
 ```bash
 curl "{BASE_URL}/api/favorites"
@@ -575,7 +580,13 @@ curl "{BASE_URL}/api/favorites"
     }
   ],
   "favorites": [],
-  "candidates": []
+  "candidates": [],
+  "pagination": {
+    "limit": 100,
+    "offset": 0,
+    "hasMore": false,
+    "nextOffset": null
+  }
 }
 ```
 
@@ -781,17 +792,17 @@ curl -X DELETE "{BASE_URL}/api/creators/1"
 
 不存在时返回 `404`。
 
-## 11. 播放
+## 11. 播放与离线下载
 
-播放分三步：
+播放或下载分三步：
 
 1. `POST /api/tracks/prepare`
 2. 轮询 `GET /api/tracks/{trackId}`
-3. `ready` 后播放 `/api/tracks/{trackId}/stream`
+3. `ready` 后播放 `/api/tracks/{trackId}/stream`，或下载 `/api/tracks/{trackId}/download`
 
 ### POST `/api/tracks/prepare`
 
-准备候选视频的音频播放。后端会创建或复用 Track，并通过 kernel 提交提取 job。
+准备候选视频的音频播放/下载。后端会创建或复用 Track，并通过 kernel 提交提取 job。
 
 请求：
 
@@ -832,8 +843,19 @@ curl -X POST "{BASE_URL}/api/tracks/prepare" \
     "bvid": "BV1xx411c7mD",
     "title": "歌曲标题",
     "status": "preparing",
-    "failureReason": null
-  }
+    "failureReason": null,
+    "media": {
+      "streamUrl": null,
+      "downloadUrl": null,
+      "checksum": null,
+      "sizeBytes": null,
+      "mimeType": null,
+      "fileName": null,
+      "expiresAt": null,
+      "resumable": false
+    }
+  },
+  "pollAfterMs": 1500
 }
 ```
 
@@ -858,8 +880,19 @@ curl "{BASE_URL}/api/tracks/456"
     "artifactSha256": "abc123...",
     "artifactSizeBytes": 1234567,
     "artifactMimeType": "audio/mp4",
-    "failureReason": null
-  }
+    "failureReason": null,
+    "media": {
+      "streamUrl": "/api/tracks/456/stream",
+      "downloadUrl": "/api/tracks/456/download",
+      "checksum": { "algorithm": "sha-256", "value": "abc123..." },
+      "sizeBytes": 1234567,
+      "mimeType": "audio/mp4",
+      "fileName": "歌曲标题 - BV1xx411c7mD.m4a",
+      "expiresAt": "2026-08-14T12:00:00.000Z",
+      "resumable": true
+    }
+  },
+  "pollAfterMs": null
 }
 ```
 
@@ -869,6 +902,38 @@ curl "{BASE_URL}/api/tracks/456"
 - `ready`: 停止轮询，开始播放 stream。
 - `failed`: 显示 `failureReason`，可提供重试。
 - `expired`: 调 `POST /api/tracks/{trackId}/refresh` 或重新 `prepare`。
+- 暂时无法连接 kernel 时仍保持 `preparing`，`failureReason` 给出可重试提示。
+- 响应头 `Retry-After: 2` 与 JSON `pollAfterMs` 可用于安排下一次轮询。
+
+### GET `/api/tracks`
+
+恢复当前 App owner 的 Track/下载任务。支持 `limit`（1-100）、`offset` 和可选 `status=pending|preparing|ready|expired|failed`。接口会同步本页最多 20 个准备中任务。
+
+```bash
+curl "{BASE_URL}/api/tracks?limit=50&offset=0&status=ready"
+```
+
+响应包含 `tracks`（每项带 `media`）和 `pagination.hasMore/nextOffset`。手机端冷启动时可先调用它恢复未完成下载。
+
+### POST `/api/tracks/status`
+
+一次批量同步最多 20 个 Track，适合播放队列与下载管理器减少轮询请求：
+
+```json
+{ "trackIds": [456, 457, 458] }
+```
+
+响应：
+
+```json
+{
+  "tracks": [],
+  "missingTrackIds": [458],
+  "pollAfterMs": 1500
+}
+```
+
+重复 ID 会自动去重；不属于当前 App owner 的 ID 会放入 `missingTrackIds`，不会泄漏其他用户信息。
 
 ### POST `/api/tracks/{trackId}/refresh`
 
@@ -894,7 +959,7 @@ curl "{BASE_URL}/api/tracks/456"
 }
 ```
 
-### GET `/api/tracks/{trackId}/stream`
+### GET/HEAD `/api/tracks/{trackId}/stream`
 
 音频流接口。播放器直接使用这个 URL：
 
@@ -922,6 +987,47 @@ Range: bytes=0-
 - 不要下载完整音频文件到 App storage。
 - 收到 `410` 后重新 prepare。
 - 收到 `409` 后继续轮询 Track 状态。
+
+### GET/HEAD `/api/tracks/{trackId}/download`
+
+把准备好的音频以附件流式交给浏览器或手机客户端下载。`GET` 返回文件体；`HEAD` 只返回大小、类型、校验和与续传能力，便于下载管理器先探测。
+
+```bash
+curl -I "{BASE_URL}/api/tracks/456/download"
+curl -L -o song.m4a "{BASE_URL}/api/tracks/456/download"
+```
+
+关键响应头：
+
+| Header | 用途 |
+| --- | --- |
+| `Content-Disposition: attachment` | UTF-8 安全文件名 |
+| `Accept-Ranges: bytes` | 支持断点续传 |
+| `Content-Length` / `Content-Range` | 文件或分段大小 |
+| `ETag: "sha256-..."` | SHA-256 强校验标识 |
+| `X-Content-SHA256` | 完整文件 SHA-256 |
+| `X-File-Size` | 完整文件字节数 |
+| `X-Artifact-Expires-At` | 服务端临时 artifact 的过期时间 |
+
+断点续传示例：
+
+```http
+GET /api/tracks/456/download
+Range: bytes=1048576-
+If-Range: "sha256-abc123..."
+```
+
+状态处理：
+
+- `200`: 完整文件。
+- `206`: 分段成功，追加到本地临时文件。
+- `304`: 条件请求未修改。
+- `409` + `TRACK_NOT_READY`: 按 `Retry-After` 继续轮询。
+- `410` + `TRACK_EXPIRED`: 重新 `refresh/prepare`，不要把旧分段拼到新 artifact。
+- `416`: 本地偏移超过文件末尾；用 `Content-Range` 和 `HEAD` 重新校准。
+- `502`: kernel 暂时不可用，指数退避后重试；不要清除已下载分段。
+
+下载完成后按 `X-Content-SHA256` 校验完整文件。客户端下载文件可以在断网后由系统播放器播放；不要把它回传或持久化到 App 服务器 storage。
 
 ## 12. 推荐/收藏视图
 
@@ -1015,9 +1121,11 @@ curl "{BASE_URL}/api/diagnostics"
 ### 首次打开
 
 1. `GET /api/health`
-2. `GET /api/kernel/login/status`
-3. `GET /api/favorites`
-4. `GET /api/creators`
+2. `GET /api/capabilities`
+3. `GET /api/kernel/login/status`
+4. `GET /api/favorites?limit=100&offset=0`
+5. `GET /api/creators`
+6. `GET /api/tracks?limit=50&offset=0` 恢复播放/下载任务
 
 ### 搜索并播放
 
@@ -1027,6 +1135,15 @@ curl "{BASE_URL}/api/diagnostics"
 4. `POST /api/tracks/prepare`
 5. 轮询 `GET /api/tracks/{trackId}`
 6. `status=ready` 后播放 `{BASE_URL}/api/tracks/{trackId}/stream`
+
+### 下载离线
+
+1. 用户点击下载，`POST /api/tracks/prepare`。
+2. 单首轮询 `GET /api/tracks/{id}`，多首用 `POST /api/tracks/status`。
+3. `ready` 后先 `HEAD /api/tracks/{id}/download` 记录大小、ETag、SHA-256。
+4. `GET /api/tracks/{id}/download`；中断后用 `Range` + `If-Range` 续传。
+5. 完成后校验 SHA-256，再把临时文件原子重命名为 `media.fileName`。
+6. 收到 `410` 时丢弃旧分段并重新准备；收到 `502` 时保留分段并退避重试。
 
 ### 收藏
 
@@ -1089,7 +1206,7 @@ kernel local path
 - Cookie 导入、导出或展示
 - browser profile 文件读取
 - 签名媒体 URL 抓取
-- 音频/视频文件持久化缓存
+- 音频/视频文件持久化到 App 服务器（客户端设备上的用户主动离线文件允许）
 - 批量爬取、无限翻页或账号池
 - CAPTCHA、DRM/EME、会员/区域/access-control 绕过
 
@@ -1124,6 +1241,7 @@ APP_OWNER_ID=local
 必须实现：
 
 - `GET /api/health`
+- `GET /api/capabilities`
 - `POST /api/search`
 - `GET /api/favorites`
 - `POST /api/favorites`
@@ -1131,6 +1249,7 @@ APP_OWNER_ID=local
 - `POST /api/tracks/prepare`
 - `GET /api/tracks/{trackId}`
 - 播放 `/api/tracks/{trackId}/stream`
+- 下载 `/api/tracks/{trackId}/download`
 
 推荐实现：
 
@@ -1139,6 +1258,8 @@ APP_OWNER_ID=local
 - `GET /api/creators`
 - `POST /api/creators`
 - `POST /api/candidates/{candidateId}` 记录互动
+- `GET /api/tracks` 恢复任务
+- `POST /api/tracks/status` 批量轮询
 
 调试/管理端实现：
 

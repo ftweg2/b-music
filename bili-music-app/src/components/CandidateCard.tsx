@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import type { CandidateWithScore, InteractionAction } from "@/lib/models";
 import { makeReturnTo } from "@/lib/navigation";
-import { playCandidate, prewarmCandidate } from "./PlayerDock";
+import { downloadCandidate, playCandidate, prewarmCandidate } from "./PlayerDock";
 
 export function CandidateCard({ candidate }: { candidate: CandidateWithScore }) {
   const [status, setStatus] = useState<string>("");
@@ -133,6 +133,16 @@ export function CandidateCard({ candidate }: { candidate: CandidateWithScore }) 
 
         <div className="row">
           <button type="button" onClick={() => playCandidate(candidate)}>播放</button>
+          <button
+            type="button"
+            className="secondary"
+            onClick={() => {
+              downloadCandidate(candidate);
+              setStatus("正在准备下载，完成后浏览器会保存音频");
+            }}
+          >
+            下载
+          </button>
           <button type="button" className={favorited ? "favoriteActive" : "secondary"} onClick={() => void toggleFavorite()}>
             {favorited ? "已收藏" : "收藏"}
           </button>

@@ -8,14 +8,19 @@ import {
   listFavoriteVideos
 } from "@/lib/db";
 import { currentAppOwnerId } from "@/lib/appOwner";
-import { sanitizeNullableText, sanitizeText } from "@/lib/sanitize";
+import { clampNumber, sanitizeNullableText, sanitizeText } from "@/lib/sanitize";
 import { toCandidateWithScore } from "@/lib/search/cache";
 
 export const runtime = "nodejs";
 
-export async function GET() {
+export async function GET(request: Request) {
   const ownerId = await currentAppOwnerId();
-  const rows = listFavoriteVideos(100, ownerId);
+  const url = new URL(request.url);
+  const limit = Math.round(clampNumber(url.searchParams.get("limit"), 1, 100, 100));
+  const offset = Math.round(clampNumber(url.searchParams.get("offset"), 0, 100_000, 0));
+  const page = listFavoriteVideos(limit + 1, ownerId, offset);
+  const hasMore = page.length > limit;
+  const rows = page.slice(0, limit);
   const candidates = rows.map((row) => row.candidate);
   const favorites = favoriteBvids(candidates.map((candidate) => candidate.bvid), ownerId);
   const items = rows.map((row) => ({
@@ -26,7 +31,13 @@ export async function GET() {
     ownerId,
     favorites: items.map((item) => item.favorite),
     candidates: items.map((item) => item.candidate),
-    items
+    items,
+    pagination: {
+      limit,
+      offset,
+      hasMore,
+      nextOffset: hasMore ? offset + items.length : null
+    }
   });
 }
 
