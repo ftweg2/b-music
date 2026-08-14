@@ -28,3 +28,21 @@ test("API search route returns ranked mock candidates", async () => {
   assert.equal(payload.candidates[0].creatorMid, "111111");
   closeDatabaseForTests();
 });
+
+test("API search route treats the string false as false", async () => {
+  process.env.SEARCH_PROVIDER = "mock";
+  process.env.DATABASE_PATH = path.join(os.tmpdir(), `bili-music-app-api-false-${Date.now()}-${Math.random()}.sqlite`);
+  closeDatabaseForTests();
+  resetDatabaseForTests();
+  const response = await POST(
+    new Request("http://localhost/api/search", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ keyword: "night", useRemote: "false", limit: 20 })
+    })
+  );
+  const payload = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(payload.remoteUsed, false);
+  closeDatabaseForTests();
+});

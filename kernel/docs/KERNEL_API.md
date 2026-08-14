@@ -160,6 +160,7 @@ GET /v1/jobs/{job_id}?external_owner_id=user_or_team_123
 POST /v1/jobs/{job_id}/cancel
 GET /v1/jobs/{job_id}/artifacts?external_owner_id=user_or_team_123
 GET /v1/jobs/{job_id}/artifacts/{name}?external_owner_id=user_or_team_123
+HEAD /v1/jobs/{job_id}/artifacts/{name}?external_owner_id=user_or_team_123
 ```
 
 Cancellation requires a JSON body containing the owner:
@@ -170,6 +171,8 @@ Cancellation requires a JSON body containing the owner:
 
 All job status, cancellation, artifact listing, and artifact download requests verify
 `external_owner_id` against the immutable job owner recorded at submission.
+
+Artifact downloads support byte ranges, including `206` and `416`. `HEAD` returns the same metadata without a body. Successful responses include `Accept-Ranges`, `Content-Length`, `X-Content-SHA256`, `X-File-Size`, and a strong SHA-256-based `ETag`; clients may resume with `Range` and `If-Range`.
 
 ## Metadata Search
 

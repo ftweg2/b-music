@@ -2,6 +2,26 @@
 
 All notable changes to B-Music are documented here. The project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+## [1.2.0] - 2026-08-14
+
+### Added
+
+- Web and mobile offline download API with `GET`/`HEAD`, byte-range resume, safe attachment filenames, size, expiry, and SHA-256 metadata.
+- Web download buttons and a `/downloads` task center; background downloads no longer interrupt playback.
+- Mobile-oriented capability discovery, owner-scoped Track restore/listing, batch status polling, and candidate/favorite pagination.
+
+### Changed
+
+- Track API responses now include additive `media` links and `pollAfterMs` guidance while preserving existing fields.
+- Transient kernel/network failures remain retryable instead of being recorded as permanent extraction failures.
+
+### Fixed
+
+- Separated App metadata ownership from immutable kernel job ownership so polling, streaming, and downloading work in multi-user mode.
+- Recovered artifacts safely after moving a kernel data directory between Docker and host environments.
+
 ## [1.1.0] - 2026-08-13
 
 ### Added
@@ -54,5 +74,7 @@ All notable changes to B-Music are documented here. The project follows [Semanti
 - Preserved favorites across candidate cache replacement and isolated Track access by App owner.
 - Cleared stale App owner cookies when kernel login is no longer active.
 
+[Unreleased]: https://github.com/ftweg2/b-music/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/ftweg2/b-music/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/ftweg2/b-music/releases/tag/v1.1.0
 [1.0.0]: https://github.com/ftweg2/b-music/releases/tag/v1.0.0

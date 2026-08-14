@@ -32,7 +32,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="bili-ctf-audio-kernel",
-    version="1.1.0",
+    version="1.2.0",
     description="Kernel-only authorized Bilibili CTF audio extraction service.",
     lifespan=lifespan,
 )

@@ -81,6 +81,7 @@ export type FavoriteVideo = {
 export type Track = {
   id: number;
   externalOwnerId: string;
+  kernelOwnerId: string;
   candidateId: number;
   bvid: string;
   title: string;

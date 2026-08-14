@@ -2,21 +2,21 @@
 
 [![CI](https://github.com/ftweg2/b-music/actions/workflows/ci.yml/badge.svg)](https://github.com/ftweg2/b-music/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Release](https://img.shields.io/badge/release-1.1.0-7c3aed.svg)](https://github.com/ftweg2/b-music/releases/tag/v1.1.0)
+[![Release](https://img.shields.io/badge/release-1.2.0-7c3aed.svg)](https://github.com/ftweg2/b-music/releases/tag/v1.2.0)
 
 B-Music is a local-first Bilibili music discovery app with a separate, Dockerized audio kernel. It helps a trusted local user search and rank music-like videos, keep a metadata-only library, and prepare original audio from authorized CTF material or videos the user can normally access.
 
-B-Music 是一个本地优先的 Bilibili 音乐发现项目。Web App 负责搜索、排序、收藏和播放体验；Docker 内核负责登录态与授权音频处理，二者通过 HTTP API 隔离。
+B-Music 是一个本地优先的 Bilibili 音乐发现项目。Web App 负责搜索、排序、收藏、播放和客户端下载体验；Docker 内核负责登录态与授权音频处理，二者通过 HTTP API 隔离。
 
 ## Project status
 
-`v1.1.0` is the current stable release. It is intended for a single trusted local operator, with the App and extraction kernel running as separate processes. The HTTP API, artifact manifests, and three sequential extraction strategies are release-supported; this project is not an internet-facing multi-tenant service.
+`v1.2.0` is the current stable release. It is intended for a single trusted local operator, with the App and extraction kernel running as separate processes. The HTTP API, resumable device-owned downloads, artifact manifests, and three sequential extraction strategies are release-supported; this project is not an internet-facing multi-tenant service.
 
 ## Highlights
 
-- Chinese Next.js interface for search, followed creators, favorites, queues, and streaming playback.
+- Chinese Next.js interface for search, followed creators, favorites, queues, streaming playback, and device-owned offline downloads.
 - Explicit ranking with text relevance, creator preference, music likelihood, recency, and interaction signals.
-- Metadata-only App storage: no audio/video files, cookies, browser profiles, or signed media URLs.
+- Metadata-only App storage: no App-side audio/video copies, cookies, browser profiles, or signed media URLs; downloads stream directly to the client device.
 - Dockerized FastAPI kernel with `api_dash`, `browser_network`, and `mse_sourcebuffer` strategies.
 - Kernel-owned Bilibili login state with QR login and user-supplied cookie/storage-state import.
 - Raw artifact preservation, SHA-256 checksums, strategy reports, and sanitized errors.
@@ -98,7 +98,7 @@ Validate the container configuration without starting it:
 docker compose -f kernel/docker-compose.yml config --quiet
 ```
 
-Release `v1.1.0` was validated with 70 kernel tests plus the App test, typecheck, and production-build suites. Strategy coverage is explicit:
+Release `v1.2.0` was validated with 71 kernel tests plus 44 App tests, typecheck, and production-build suites. Strategy coverage is explicit:
 
 | Strategy | Release validation |
 | --- | --- |

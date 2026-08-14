@@ -494,6 +494,23 @@ label {
   align-items: center;
 }
 
+.downloadPanel {
+  margin-top: 16px;
+}
+
+.downloadHeader {
+  justify-content: space-between;
+}
+
+.downloadHeader .panelTitle {
+  margin-bottom: 0;
+}
+
+.downloadPanel code {
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .candidateList {
   display: grid;
   gap: 14px;
@@ -1027,6 +1044,71 @@ pre {
 }
 
 @media (max-width: 680px) {
+  .downloadPanel .tableWrap {
+    overflow: visible;
+  }
+
+  .downloadTable,
+  .downloadTable tbody,
+  .downloadTable tr,
+  .downloadTable td {
+    display: block;
+    width: 100%;
+  }
+
+  .downloadTable thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+
+  .downloadTable tbody {
+    display: grid;
+    gap: 12px;
+  }
+
+  .downloadTable tr {
+    overflow: hidden;
+    border: 1px solid rgba(23, 23, 34, 0.1);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.72);
+  }
+
+  .downloadTable td {
+    display: grid;
+    grid-template-columns: 82px minmax(0, 1fr);
+    gap: 10px;
+    align-items: center;
+    border-bottom: 1px solid rgba(23, 23, 34, 0.07);
+  }
+
+  .downloadTable td::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 850;
+  }
+
+  .downloadTable td:first-child {
+    display: block;
+    padding: 14px 12px;
+  }
+
+  .downloadTable td:first-child::before {
+    display: none;
+  }
+
+  .downloadTable td:last-child {
+    border-bottom: 0;
+  }
+
+  .downloadTable td:last-child .buttonLink {
+    width: 100%;
+  }
+
   .searchPrimary {
     grid-template-columns: 1fr;
   }

@@ -16,7 +16,7 @@ export default async function FavoritesPage() {
     <>
       <header className="pageHeader">
         <h2>收藏</h2>
-        <p>这里是 App 自己记住的收藏候选视频，不会同步到 B 站，也不会下载音频文件。</p>
+        <p>这里是 App 自己记住的收藏候选视频，不会同步到 B 站；需要时可单独下载到设备离线听。</p>
       </header>
       <section className="panel">
         <h3 className="panelTitle">收藏夹</h3>

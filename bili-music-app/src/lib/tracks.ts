@@ -4,11 +4,13 @@ import {
   getCandidateByBvid,
   getCandidateById,
   getOrHydrateFavoriteCandidateByBvid,
+  getTrackByCandidateId,
   getTrackById,
   updateTrack
 } from "./db";
 import {
   getKernelJob,
+  KernelRequestError,
   listKernelArtifacts,
   submitKernelAudioJob,
   type KernelArtifact,
@@ -33,6 +35,32 @@ export type PrepareTrackInput = {
 };
 
 const TERMINAL_FAILED = new Set(["failed", "cancelled"]);
+
+type ReusableTrackInput = Pick<
+  PrepareTrackInput,
+  "candidateId" | "bvid" | "appOwnerId" | "externalOwnerId" | "strategyMode" | "strategy"
+>;
+
+export function getReusablePreparedTrack(input: ReusableTrackInput): Track | null {
+  const strategyMode = normalizeStrategyMode(input.strategyMode);
+  if (strategyMode === "force" && !input.strategy) {
+    throw new Error("强制策略模式需要指定 strategy");
+  }
+  const candidate = resolvePlayableCandidate(input);
+  if (!candidate) {
+    throw new Error("候选视频不存在");
+  }
+  const appOwnerId = sanitizeText(input.appOwnerId || "local", 128) || "local";
+  const existing = getTrackByCandidateId(candidate.id, appOwnerId);
+  if (!existing) {
+    return null;
+  }
+  const track = expireIfNeeded(existing);
+  if (track.status === "ready" || (track.status === "preparing" && track.kernelJobId)) {
+    return track;
+  }
+  return null;
+}
 
 export async function prepareTrack(input: PrepareTrackInput): Promise<Track> {
   const candidate = resolvePlayableCandidate(input);
@@ -60,7 +88,7 @@ export async function prepareTrack(input: PrepareTrackInput): Promise<Track> {
   }
 
   const jobId = newKernelJobId(track.id);
-  const claimed = claimTrackPreparation(track.id, jobId, appOwnerId);
+  const claimed = claimTrackPreparation(track.id, jobId, appOwnerId, externalOwnerId);
   if (!claimed) {
     return getTrackById(track.id, appOwnerId) || track;
   }
@@ -77,9 +105,14 @@ export async function prepareTrack(input: PrepareTrackInput): Promise<Track> {
     });
     return track;
   } catch (error) {
+    const definitiveRejection = error instanceof KernelRequestError && !error.retryable;
     return updateTrack(track.id, {
-      status: "preparing",
-      failureReason: sanitizeText(`内核任务提交状态待确认：${sanitizeText(error)}`),
+      status: definitiveRejection ? "failed" : "preparing",
+      failureReason: sanitizeText(
+        definitiveRejection
+          ? `内核拒绝了任务：${sanitizeText(error)}`
+          : `内核任务提交状态待确认：${sanitizeText(error)}`
+      ),
       expiresAt: null
     }, appOwnerId);
   }
@@ -102,7 +135,9 @@ export async function refreshTrack(
   });
 }
 
-function resolvePlayableCandidate(input: PrepareTrackInput) {
+function resolvePlayableCandidate(
+  input: Pick<PrepareTrackInput, "candidateId" | "bvid" | "appOwnerId" | "externalOwnerId">
+) {
   if (Number.isFinite(input.candidateId)) {
     const candidate = getCandidateById(Number(input.candidateId));
     if (candidate) {
@@ -143,9 +178,9 @@ export async function syncTrackWithKernel(track: Track): Promise<Track> {
     return updateTrack(track.id, { status: "pending", failureReason: null }, track.externalOwnerId);
   }
   try {
-    const job = await getKernelJob(track.kernelJobId, track.externalOwnerId);
+    const job = await getKernelJob(track.kernelJobId, track.kernelOwnerId);
     if (job.status === "succeeded") {
-      return syncSucceededJob(track, job);
+      return await syncSucceededJob(track, job);
     }
     if (TERMINAL_FAILED.has(job.status)) {
       return updateTrack(track.id, {
@@ -159,10 +194,20 @@ export async function syncTrackWithKernel(track: Track): Promise<Track> {
       failureReason: null
     }, track.externalOwnerId);
   } catch (error) {
+    if (error instanceof KernelRequestError && !error.retryable) {
+      return updateTrack(track.id, {
+        status: "failed",
+        failureReason: sanitizeText(
+          error.status === 404
+            ? "内核任务不存在，请重新准备"
+            : `内核任务无法继续：${error.message}`
+        ),
+        expiresAt: null
+      }, track.externalOwnerId);
+    }
     return updateTrack(track.id, {
-      status: "failed",
-      failureReason: sanitizeText(error),
-      expiresAt: null
+      status: "preparing",
+      failureReason: sanitizeText(`暂时无法连接内核，将继续重试：${sanitizeText(error)}`)
     }, track.externalOwnerId);
   }
 }
@@ -192,7 +237,7 @@ function expireIfNeeded(track: Track): Track {
 }
 
 async function syncSucceededJob(track: Track, job: KernelJobStatus): Promise<Track> {
-  const artifactList = await listKernelArtifacts(job.job_id, track.externalOwnerId);
+  const artifactList = await listKernelArtifacts(job.job_id, track.kernelOwnerId);
   const artifact = selectPlayableArtifact(artifactList.artifacts);
   if (!artifact) {
     return updateTrack(track.id, {
@@ -213,12 +258,32 @@ async function syncSucceededJob(track: Track, job: KernelJobStatus): Promise<Tra
   }, track.externalOwnerId);
 }
 
+export async function getSyncedTracks(
+  trackIds: number[],
+  appOwnerId = "local",
+  concurrency = 4
+): Promise<Array<Track | null>> {
+  const results = new Array<Track | null>(trackIds.length);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < trackIds.length) {
+      const index = cursor++;
+      results[index] = await getSyncedTrack(trackIds[index], appOwnerId);
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(Math.max(1, concurrency), trackIds.length) }, worker)
+  );
+  return results;
+}
+
 function newKernelJobId(trackId: number): string {
   return `app_track_${trackId}_${Date.now()}`;
 }
 
 function expiresAtIso(): string {
-  const ttlSeconds = Math.max(300, Number(process.env.TRACK_ARTIFACT_TTL_SECONDS || 24 * 60 * 60));
+  const configured = Number(process.env.TRACK_ARTIFACT_TTL_SECONDS || 24 * 60 * 60);
+  const ttlSeconds = Number.isFinite(configured) ? Math.max(300, configured) : 24 * 60 * 60;
   return new Date(Date.now() + ttlSeconds * 1000).toISOString();
 }
 

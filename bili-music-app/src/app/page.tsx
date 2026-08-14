@@ -7,7 +7,7 @@ export default function HomePage() {
     <>
       <header className="pageHeader">
         <h2>今天想从 B 站淘哪首歌？</h2>
-        <p>输入关键词，先把候选视频排出来。关注 UP 和收藏视频会自动靠前，音频提取以后再交给外部内核。</p>
+        <p>输入关键词，先把候选视频排出来。关注 UP 和收藏视频会自动靠前，准备好后可在线播放或下载到设备离线听。</p>
       </header>
 
       <SearchBox />
@@ -23,11 +23,12 @@ export default function HomePage() {
         </div>
         <div className="metric">
           <strong>03</strong>
-          <span>点击播放后交给内核准备音频</span>
+          <span>在线播放 / 下载离线</span>
         </div>
         <div className="guideActions">
           <Link className="buttonLink secondary" href="/creators">关注 UP</Link>
           <Link className="buttonLink ghost" href="/favorites">打开收藏</Link>
+          <Link className="buttonLink ghost" href="/downloads">离线下载</Link>
         </div>
       </section>
     </>

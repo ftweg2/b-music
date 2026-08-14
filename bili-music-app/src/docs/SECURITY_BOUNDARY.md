@@ -1,11 +1,11 @@
 # Security Boundary
 
-This app is metadata-only for stored data. Playback is allowed only as a stream proxy from the external kernel to the browser.
+This app is metadata-only for server-side stored data. Playback and an explicit user-initiated download are allowed only as streaming proxies from the external kernel to the browser or mobile client. The App server never keeps a second media copy.
 
 Forbidden:
 
 - Audio extraction.
-- Video/audio download or storage in App storage.
+- Video/audio persistence in App server storage.
 - Cookie storage.
 - Browser login state storage.
 - Playwright or browser automation.
@@ -28,3 +28,5 @@ Allowed:
 - Manual preferred UP creator configuration.
 - Kernel integration through HTTP APIs only.
 - Streaming kernel artifacts through `/api/tracks/[id]/stream` with Range header passthrough.
+- User-initiated client downloads through `/api/tracks/[id]/download`; the browser or mobile OS owns the saved file.
+- `HEAD`, `Range`, `If-Range`, SHA-256, and size metadata for resumable client downloads.

@@ -2,7 +2,7 @@
 
 App layer for local-first Bilibili music discovery.
 
-This repository stores metadata-only `CandidateVideo` records, lets users build a local music library, follow preferred UP creators, ranks search results, and provides a small Chinese Web UI. It does not extract audio, download media, store cookies, run Playwright, or implement the extraction kernel.
+This repository stores metadata-only `CandidateVideo` records, lets users build a local music library, follow preferred UP creators, ranks search results, and provides a small Chinese Web UI. It does not extract audio or persist media in App storage, store cookies, run Playwright, or implement the extraction kernel. User-initiated downloads are streamed to the browser/mobile device for offline listening.
 
 ## Run
 
@@ -38,13 +38,15 @@ When `内核登录态搜索` is selected, the search page shows a kernel login p
 
 The App does not receive Cookie, storage state, browser profile files, QR token internals, or sensitive headers.
 
-## Playback
+## Playback And Offline Download
 
 Playback follows `准备音频 -> 流式播放 -> 队列预热`.
 
 When a user clicks `播放` on a candidate video, the App creates or reuses a metadata-only `Track`, submits a kernel job with `outputs: ["m4a"]`, polls kernel status through App API routes, and plays `/api/tracks/{track_id}/stream` with a native `<audio>` element.
 
 The stream endpoint proxies the kernel artifact and forwards `Range` requests for seeking. The App stores only track metadata: kernel job id, artifact name, size, sha256, mime type, duration, status, and expiration. It does not write audio files, signed media URLs, raw buffers, cookies, or browser session state to App storage.
+
+Click `下载` on a candidate or open `/downloads`. The App prepares the same audio artifact and streams `/api/tracks/{track_id}/download` with an attachment filename, `HEAD`, byte ranges, SHA-256, and size headers. The browser or phone stores the file; the App server does not keep another copy. Downloads run independently and do not interrupt the current song.
 
 ## Cover Images
 
@@ -60,7 +62,7 @@ The proxy streams image responses for display only. It does not persist images, 
 4. Use `收藏` to save candidates into the local App library. This is not Bilibili收藏.
 5. Use `关注 UP` on a candidate to make that creator rank higher and join followed-UP search expansion.
 6. Click `播放` on a candidate. Fill the bottom player `owner/profile` fields if they were not already saved by the kernel login panel.
-7. Open `/favorites` for the local 收藏 library. The old `/recommendations` path now redirects there.
+7. Open `/favorites` for the local 收藏 library, or `/downloads` for prepared download tasks. The old `/recommendations` path redirects to favorites.
 
 ## Local Library
 
@@ -73,7 +75,7 @@ The App now keeps a metadata-only local music library:
 
 No Bilibili favorites are changed, and no media files are saved in the App.
 
-Advanced playback features such as lyrics, equalizer, spectrum, offline cache, and cross-device sync are intentionally out of scope.
+Advanced playback features such as lyrics, equalizer, spectrum, App-managed offline cache, and cross-device sync are intentionally out of scope. Client-owned downloaded files are supported.
 
 ## Docs
 

@@ -2,7 +2,8 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import type { CandidateWithScore, Track } from "@/lib/models";
+import type { CandidateWithScore } from "@/lib/models";
+import type { TrackApiResource } from "@/lib/trackApi";
 import {
   canMoveManually,
   nextIndexOnEnded,
@@ -19,7 +20,7 @@ type QueueItem = {
   creatorName: string | null;
 };
 
-type PlayEvent = CustomEvent<{ candidate: CandidateWithScore; mode?: "play" | "prewarm" }>;
+type PlayEvent = CustomEvent<{ candidate: CandidateWithScore; mode?: "play" | "prewarm" | "download" }>;
 
 type StrategyChoice = "auto" | "api_dash" | "browser_network" | "mse_sourcebuffer";
 
@@ -42,10 +43,12 @@ const PLAYBACK_AUTO_STRATEGY_ORDER: Array<"api_dash" | "browser_network" | "mse_
 export function PlayerDock() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const prewarmedRef = useRef<Set<number>>(new Set());
+  const downloadTasksRef = useRef<Map<number, number>>(new Map());
+  const downloadTimersRef = useRef<Map<number, number>>(new Map());
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [history, setHistory] = useState<QueueItem[]>([]);
   const [currentIndex, setCurrentIndex] = useState(-1);
-  const [track, setTrack] = useState<Track | null>(null);
+  const [track, setTrack] = useState<TrackApiResource | null>(null);
   const [message, setMessage] = useState("选择一首候选视频开始准备音频");
   const [busy, setBusy] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -59,7 +62,7 @@ export function PlayerDock() {
   const currentItem = currentIndex >= 0 ? queue[currentIndex] : null;
   const nextCandidateIndex = nextIndexOnManual(currentIndex, queue.length, playbackMode, "next");
   const nextItem = nextCandidateIndex === null ? null : queue[nextCandidateIndex];
-  const streamSrc = track?.status === "ready" ? `/api/tracks/${track.id}/stream` : undefined;
+  const streamSrc = track?.status === "ready" ? track.media.streamUrl || `/api/tracks/${track.id}/stream` : undefined;
   const hasPlayerContent = queue.length > 0 || Boolean(track);
   const isCompact = !hasPlayerContent || !isExpanded;
 
@@ -91,6 +94,10 @@ export function PlayerDock() {
       const item = toQueueItem(candidate);
       const mode = (event as PlayEvent).detail?.mode || "play";
       setIsExpanded(true);
+      if (mode === "download") {
+        void prepareDownload(item);
+        return;
+      }
       if (mode === "prewarm") {
         setQueue((current) => {
           if (current.some((entry) => entry.candidateId === item.candidateId)) {
@@ -120,6 +127,16 @@ export function PlayerDock() {
     window.addEventListener("bili-music:play-candidate", handlePlay);
     return () => window.removeEventListener("bili-music:play-candidate", handlePlay);
   }, [strategy]);
+
+  useEffect(() => {
+    return () => {
+      for (const timer of downloadTimersRef.current.values()) {
+        window.clearTimeout(timer);
+      }
+      downloadTimersRef.current.clear();
+      downloadTasksRef.current.clear();
+    };
+  }, []);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -173,7 +190,7 @@ export function PlayerDock() {
       setMessage("正在让内核准备音频...");
     }
     try {
-      const payload = await postJson<{ track: Track }>("/api/tracks/prepare", {
+      const payload = await postJson<{ track: TrackApiResource }>("/api/tracks/prepare", {
         candidateId: item.candidateId,
         bvid: item.bvid,
         strategyMode: strategy === "auto" ? "auto" : "force",
@@ -181,8 +198,8 @@ export function PlayerDock() {
         strategyOrder: strategy === "auto" ? PLAYBACK_AUTO_STRATEGY_ORDER : undefined
       });
       if (!prewarm) {
-        setTrack(payload.track);
         setMessage(messageForTrack(payload.track));
+        setTrack(payload.track);
       }
     } catch (error) {
       if (!prewarm) {
@@ -197,12 +214,72 @@ export function PlayerDock() {
 
   async function refreshTrackStatus(trackId: number) {
     try {
-      const payload = await getJson<{ track: Track }>(`/api/tracks/${trackId}`);
+      const payload = await getJson<{ track: TrackApiResource }>(`/api/tracks/${trackId}`);
       setTrack(payload.track);
       setMessage(messageForTrack(payload.track));
     } catch (error) {
       setMessage(String(error instanceof Error ? error.message : error));
     }
+  }
+
+  async function prepareDownload(item: QueueItem) {
+    if (downloadTasksRef.current.has(item.candidateId)) {
+      setMessage(`正在准备下载：${item.title}`);
+      return;
+    }
+    downloadTasksRef.current.set(item.candidateId, 0);
+    setMessage(`正在后台准备下载：${item.title}`);
+    try {
+      const payload = await postJson<{ track: TrackApiResource }>("/api/tracks/prepare", {
+        candidateId: item.candidateId,
+        bvid: item.bvid,
+        strategyMode: strategy === "auto" ? "auto" : "force",
+        strategy: strategy === "auto" ? undefined : strategy,
+        strategyOrder: strategy === "auto" ? PLAYBACK_AUTO_STRATEGY_ORDER : undefined
+      });
+      handleDownloadTrack(item, payload.track);
+    } catch (error) {
+      finishDownloadTask(item.candidateId);
+      setMessage(`下载准备失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  function handleDownloadTrack(item: QueueItem, downloadTrack: TrackApiResource) {
+    if (downloadTrack.status === "ready" && downloadTrack.media.downloadUrl) {
+      finishDownloadTask(item.candidateId);
+      startBrowserDownload(downloadTrack);
+      setMessage(`已交给浏览器下载：${downloadTrack.media.fileName || downloadTrack.title}`);
+      return;
+    }
+    if (["failed", "expired"].includes(downloadTrack.status)) {
+      finishDownloadTask(item.candidateId);
+      setMessage(downloadTrack.failureReason || "下载准备失败，请重新尝试");
+      return;
+    }
+    downloadTasksRef.current.set(item.candidateId, downloadTrack.id);
+    const timer = window.setTimeout(() => {
+      void pollDownload(item, downloadTrack.id);
+    }, POLL_INTERVAL_MS);
+    downloadTimersRef.current.set(item.candidateId, timer);
+  }
+
+  async function pollDownload(item: QueueItem, trackId: number) {
+    downloadTimersRef.current.delete(item.candidateId);
+    if (downloadTasksRef.current.get(item.candidateId) !== trackId) return;
+    try {
+      const payload = await getJson<{ track: TrackApiResource }>(`/api/tracks/${trackId}`);
+      handleDownloadTrack(item, payload.track);
+    } catch (error) {
+      finishDownloadTask(item.candidateId);
+      setMessage(`下载状态查询失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  function finishDownloadTask(candidateId: number) {
+    const timer = downloadTimersRef.current.get(candidateId);
+    if (timer !== undefined) window.clearTimeout(timer);
+    downloadTimersRef.current.delete(candidateId);
+    downloadTasksRef.current.delete(candidateId);
   }
 
   async function refreshCurrentTrack() {
@@ -215,7 +292,7 @@ export function PlayerDock() {
     setBusy(true);
     setMessage("正在重新准备音频...");
     try {
-      const payload = await postJson<{ track: Track }>(`/api/tracks/${track.id}/refresh`, {
+      const payload = await postJson<{ track: TrackApiResource }>(`/api/tracks/${track.id}/refresh`, {
         strategyMode: strategy === "auto" ? "auto" : "force",
         strategy: strategy === "auto" ? undefined : strategy,
         strategyOrder: strategy === "auto" ? PLAYBACK_AUTO_STRATEGY_ORDER : undefined
@@ -437,6 +514,15 @@ export function PlayerDock() {
           <button type="button" className="secondary" onClick={() => void favoriteCurrentItem()} disabled={busy || !currentItem}>
             收藏当前
           </button>
+          {track?.status === "ready" && track.media.downloadUrl ? (
+            <a className="buttonLink secondary" href={track.media.downloadUrl} download={track.media.fileName || undefined}>
+              下载离线{track.media.sizeBytes ? ` · ${formatBytes(track.media.sizeBytes)}` : ""}
+            </a>
+          ) : (
+            <button type="button" className="secondary" disabled>
+              准备好后可下载
+            </button>
+          )}
           <button type="button" className="ghost" onClick={() => void refreshCurrentTrack()} disabled={busy || (!currentItem && !track)}>
             重新准备
           </button>
@@ -533,6 +619,10 @@ export function prewarmCandidate(candidate: CandidateWithScore): void {
   window.dispatchEvent(new CustomEvent("bili-music:play-candidate", { detail: { candidate, mode: "prewarm" } }));
 }
 
+export function downloadCandidate(candidate: CandidateWithScore): void {
+  window.dispatchEvent(new CustomEvent("bili-music:play-candidate", { detail: { candidate, mode: "download" } }));
+}
+
 function toQueueItem(candidate: CandidateWithScore): QueueItem {
   return {
     candidateId: candidate.id,
@@ -564,12 +654,12 @@ async function parseJsonResponse<T>(response: Response): Promise<T> {
   return payload as T;
 }
 
-function messageForTrack(track: Track): string {
+function messageForTrack(track: TrackApiResource): string {
   if (track.status === "ready") {
     return "音频已准备好，正在通过 App 代理从内核流式播放";
   }
   if (track.status === "preparing") {
-    return "内核正在准备 audio.m4a，稍等一下";
+    return track.failureReason || "内核正在准备 audio.m4a，稍等一下";
   }
   if (track.status === "expired") {
     return "音频缓存已过期，点击重新准备";
@@ -580,7 +670,26 @@ function messageForTrack(track: Track): string {
   return "等待准备音频";
 }
 
-function trackStatusLabel(track: Track | null): string {
+function startBrowserDownload(track: TrackApiResource): void {
+  if (!track.media.downloadUrl) return;
+  const anchor = document.createElement("a");
+  anchor.href = track.media.downloadUrl;
+  anchor.download = track.media.fileName || "";
+  anchor.rel = "noopener";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+}
+
+function formatBytes(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const index = Math.min(units.length - 1, Math.floor(Math.log(value) / Math.log(1024)));
+  const amount = value / 1024 ** index;
+  return `${amount >= 10 || index === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[index]}`;
+}
+
+function trackStatusLabel(track: TrackApiResource | null): string {
   const labels: Record<string, string> = {
     pending: "待准备",
     preparing: "准备中",

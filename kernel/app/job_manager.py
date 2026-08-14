@@ -487,13 +487,21 @@ def artifact_path(job_id_value: str, name: str, settings: Settings | None = None
         ).fetchone()
     if not row:
         raise FileNotFoundError(safe_name)
-    path = Path(row["path"]).resolve()
     root = settings.artifacts_dir.resolve()
-    if root not in path.parents and path != root:
+    recorded_path = Path(row["path"]).resolve()
+    canonical_path = (root / job_id_value / safe_name).resolve()
+    if root not in canonical_path.parents:
         raise PermissionError("artifact path escaped artifact root")
-    if not path.is_file():
-        raise FileNotFoundError(safe_name)
-    return path
+    if root in recorded_path.parents and recorded_path.is_file():
+        return recorded_path
+    # Artifact rows may contain absolute paths from another deployment, such
+    # as Docker's /data/artifacts. After moving the same data directory to a
+    # new host, recover only through the canonical, owner-verified location.
+    if canonical_path.is_file():
+        return canonical_path
+    if root not in recorded_path.parents:
+        raise PermissionError("artifact path escaped artifact root")
+    raise FileNotFoundError(safe_name)
 
 
 def strategy_metrics(settings: Settings | None = None) -> list[dict[str, object]]:
