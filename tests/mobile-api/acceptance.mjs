@@ -50,7 +50,12 @@ function validate(value, schema, at = "response") {
 }
 function operation(method, url) {
   const pathname = new URL(url,BASE).pathname;
-  const template = document?.paths[pathname] ? pathname : Object.keys(document?.paths || {}).find((item) => new RegExp("^" + item.replace(/[.]/g,"\\.").replace(/\{[^}]+\}/g,"[^/]+") + "$").test(pathname));
+  const segments = pathname.split("/");
+  const template = document?.paths[pathname] ? pathname : Object.keys(document?.paths || {}).find((item) => {
+    const parts = item.split("/");
+    return parts.length === segments.length && parts.every((part, index) =>
+      part.startsWith("{") && part.endsWith("}") && part.length > 2 ? segments[index].length > 0 : part === segments[index]);
+  });
   return template && document.paths[template][method.toLowerCase()] ? {key:method+" "+template, value:document.paths[template][method.toLowerCase()]} : null;
 }
 async function request(method, url, body, options = {}) {
