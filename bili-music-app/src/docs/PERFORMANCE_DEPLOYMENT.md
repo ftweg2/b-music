@@ -10,7 +10,7 @@
 - [x] VPS 专用目录/端口/网络/数据目录和资源上限。
 - [x] 独立 Nginx 虚拟主机、有效 HTTPS、入口访问保护。
 - [x] 域名访问和认证后的功能冒烟，原 Nginx 配置及其他服务保持不变。
-- [ ] GitHub 提交推送成功，不包含私钥、Cookie、数据库、音频和私密验收产物。
+- [x] GitHub 提交推送成功，不包含私钥、Cookie、数据库、音频和私密验收产物。
 
 本文件在验证后补充具体数据和部署结果，不以构建成功代替上线验收。
 
@@ -41,3 +41,5 @@ Windows Node v24.19.0，独立临时 SQLite 中 20,000 条元数据，预热 25 
 - 因低配冷启动而给 QR 准备设置有界的 60 秒服务端预算、90 秒客户端预算；二维码生成后的 180 秒有效期不变。数据与接口字段保持兼容。
 
 访问凭据由 `deploy/create-access.mjs` 生成，只保留在忽略的私密文件和 VPS Nginx 中，不在本报告或 GitHub 中公开。完整站点冒烟报告在本机 `deploy/private/site-verification.json`。
+
+GitHub 的 main 要求 PR 与状态检查，因此代码推送到 `codex/performance-vps-deploy`，提交 PR [#20](https://github.com/ftweg2/b-music/pull/20)，没有绕过分支保护。CI/Release 的 Node 主版本与生产镜像统一为 24。
