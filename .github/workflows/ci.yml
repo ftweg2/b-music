@@ -21,7 +21,7 @@ jobs:
       run:
         working-directory: bili-music-app
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -39,7 +39,7 @@ jobs:
       run:
         working-directory: kernel
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -53,14 +53,14 @@ jobs:
     name: Compose configuration
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: docker compose -f kernel/docker-compose.yml config --quiet
 
   container-smoke:
     name: Kernel container smoke
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build kernel image
         run: docker build --tag b-music-kernel:ci kernel
       - name: Start kernel container
