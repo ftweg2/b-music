@@ -1,0 +1,71 @@
+name: bmusic
+services:
+  app:
+    image: bmusic-app:${BMUSIC_RELEASE:?set BMUSIC_RELEASE}
+    restart: unless-stopped
+    init: true
+    ports:
+      - "127.0.0.1:13100:3000"
+    environment:
+      NODE_ENV: production
+      NODE_OPTIONS: --max-old-space-size=128
+      DATABASE_PATH: /data/bili-music-app.sqlite
+      APP_OWNER_ID: local
+      KERNEL_EXTERNAL_OWNER_ID: local
+      APP_LIBRARY_MODE: account
+      KERNEL_BASE_URL: http://kernel:8000
+      APP_ALLOWED_ORIGINS: https://bmusic.ftwegc.com,capacitor://localhost
+    volumes:
+      - ./data/app:/data
+    depends_on:
+      kernel:
+        condition: service_healthy
+    mem_limit: 224m
+    memswap_limit: 224m
+    oom_score_adj: 300
+    cpus: 0.60
+    pids_limit: 128
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+  kernel:
+    image: bmusic-kernel:${BMUSIC_RELEASE:?set BMUSIC_RELEASE}
+    restart: unless-stopped
+    init: true
+    ports:
+      - "127.0.0.1:18100:8000"
+    environment:
+      KERNEL_DATA_DIR: /data
+      MAX_ACTIVE_JOBS: "1"
+      PLAYWRIGHT_EXECUTABLE_PATH: /opt/chrome-headless-shell-linux64/chrome-headless-shell
+      LOGIN_PREPARATION_TIMEOUT_SECONDS: "60"
+    volumes:
+      - ./data/kernel:/data
+    shm_size: 128m
+    mem_limit: 512m
+    memswap_limit: 512m
+    oom_score_adj: 500
+    cpus: 1.0
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    stop_grace_period: 30s
+    healthcheck:
+      test: [CMD, curl, -fsS, http://localhost:8000/health]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}

@@ -1,24 +1,25 @@
+import { apiEndpoint, apiOptions, ApiError, queryInteger } from "@/lib/api";
 import { NextResponse } from "next/server";
 
 import { currentAppOwnerId } from "@/lib/appOwner";
 import { favoriteBvids, listCandidates } from "@/lib/db";
 import { clampNumber } from "@/lib/sanitize";
-import { toCandidateWithScore } from "@/lib/search/cache";
+import { toCandidateItems } from "@/lib/search/cache";
 
 export const runtime = "nodejs";
 
-export async function GET(request: Request) {
+async function getHandler(request: Request) {
   const ownerId = await currentAppOwnerId();
   const url = new URL(request.url);
-  const limit = Math.round(clampNumber(url.searchParams.get("limit"), 1, 100, 100));
-  const offset = Math.round(clampNumber(url.searchParams.get("offset"), 0, 100_000, 0));
+  const limit = queryInteger(url.searchParams, "limit", 100, 1, 100);
+  const offset = queryInteger(url.searchParams, "offset", 0, 0, 100_000);
   const page = listCandidates(limit + 1, offset);
   const hasMore = page.length > limit;
   const candidates = page.slice(0, limit);
   const favorites = favoriteBvids(candidates.map((candidate) => candidate.bvid), ownerId);
   return NextResponse.json({
     ownerId,
-    candidates: candidates.map((candidate) => toCandidateWithScore(candidate, undefined, favorites.has(candidate.bvid))),
+    candidates: toCandidateItems(candidates, ownerId),
     pagination: {
       limit,
       offset,
@@ -27,3 +28,6 @@ export async function GET(request: Request) {
     }
   });
 }
+
+export const GET = apiEndpoint("GET", getHandler);
+export const OPTIONS = apiOptions(["GET"]);

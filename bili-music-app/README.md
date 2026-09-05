@@ -2,7 +2,7 @@
 
 App layer for local-first Bilibili music discovery.
 
-This repository stores metadata-only `CandidateVideo` records, lets users build a local music library, follow preferred UP creators, ranks search results, and provides a small Chinese Web UI. It does not extract audio or persist media in App storage, store cookies, run Playwright, or implement the extraction kernel. User-initiated downloads are streamed to the browser/mobile device for offline listening.
+This repository stores metadata-only `CandidateVideo` records, lets users build a local music library, follow preferred UP creators, prioritizes followed creators without numeric scores, and provides a small Chinese Web UI. It does not extract audio or persist media in App storage, store cookies, run Playwright, or implement the extraction kernel. User-initiated downloads are streamed to the browser/mobile device for offline listening.
 
 ## Run
 
@@ -60,8 +60,8 @@ The proxy streams image responses for display only. It does not persist images, 
 2. Open `/search`, enter a keyword, and choose a search source.
 3. Use `上一页` / `下一页` to request explicit search pages. Pagination is capped and user-triggered; there is no infinite crawling.
 4. Use `收藏` to save candidates into the local App library. This is not Bilibili收藏.
-5. Use `关注 UP` on a candidate to make that creator rank higher and join followed-UP search expansion.
-6. Click `播放` on a candidate. Fill the bottom player `owner/profile` fields if they were not already saved by the kernel login panel.
+5. Use `关注 UP` to bookmark that creator and find their work later.
+6. Click `播放` on a candidate. The configured kernel profile is prepared by the App; playback settings are available in the player.
 7. Open `/favorites` for the local 收藏 library, or `/downloads` for prepared download tasks. The old `/recommendations` path redirects to favorites.
 
 ## Local Library
@@ -69,16 +69,24 @@ The proxy streams image responses for display only. It does not persist images, 
 The App now keeps a metadata-only local music library:
 
 - `收藏` stores the candidate video id, note/mood fields, and timestamps in SQLite.
-- `关注 UP` stores the creator `mid`, name, homepage, and ranking weight.
-- Search first checks local metadata, then followed-UP local matches, then favorites, and only then the selected remote provider.
-- Remote followed-UP expansion is conservative: at most the top followed creators are used as extra user-triggered search hints.
+- `关注 UP` stores the creator `mid`, name, homepage, and optional notes.
+- Online search preserves source order; local search matches saved metadata separately.
+- Provider failure is explicit; pagination never switches to local results automatically. There are no music scores or extra creator searches.
 
 No Bilibili favorites are changed, and no media files are saved in the App.
 
 Advanced playback features such as lyrics, equalizer, spectrum, App-managed offline cache, and cross-device sync are intentionally out of scope. Client-owned downloaded files are supported.
 
+## Account and search flow
+
+Settings supports switching the service's active Bilibili account. Libraries and playback ranges now default to verified-account partitions; switching back restores the account's data, and the legacy library is adopted once without changing record IDs. Web and native API clients connected to the same service share the active account's settings. This is still a trusted single-active-login service, not independent per-device multi-user authentication. See [account/search behavior](src/docs/ACCOUNT_AND_SEARCH.md).
+
+## Playlists
+
+Open `/playlists` to create and organize private music collections. Add tracks from search, favorites or track details; reorder, play all, shuffle or append a playlist to the queue. Playlists are stored as owner-scoped metadata and do not download audio automatically. See [playlist behavior and limits](src/docs/PLAYLISTS.md) and the [unified API calling guide](src/docs/API_USAGE.md).
+
 ## Docs
 
-- `src/docs/API_USAGE.md`: Web and Android-facing App API usage reference.
+- [API calling guide](src/docs/API_USAGE.md): the unified Web/Android-facing v1 (revision 1.2.0) reference, including playback start/end editing and account-context guards; the running server publishes its complete schema at `/api/openapi.json`.
 - `src/docs/CLOUD_DEPLOYMENT.md`: deployment guide for App + external kernel.
 - `src/docs/OPERATIONS_CHECKLIST.md`: current quality notes and follow-up checklist.

@@ -33,6 +33,14 @@ CREATE TABLE IF NOT EXISTS login_sessions (
     FOREIGN KEY(profile_id) REFERENCES profiles(profile_id)
 );
 
+CREATE TABLE IF NOT EXISTS profile_readers (
+    lease_id TEXT PRIMARY KEY,
+    profile_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(profile_id) REFERENCES profiles(profile_id)
+);
+CREATE INDEX IF NOT EXISTS idx_profile_readers_profile ON profile_readers(profile_id);
+
 CREATE TABLE IF NOT EXISTS jobs (
     job_id TEXT PRIMARY KEY,
     external_owner_id TEXT NOT NULL,

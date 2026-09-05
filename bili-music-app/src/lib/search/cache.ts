@@ -1,135 +1,113 @@
-import {
-  favoriteBvids,
-  getCandidateByBvid,
-  interactionCounts,
-  listPreferredCreators,
-  logSearchQuery,
-  searchFavoriteCandidates,
-  searchFollowedCreatorCandidates,
-  searchLocalCandidates,
-  updateCandidateScore,
-  upsertCandidateVideo
-} from "../db";
-import type { CandidateVideo, CandidateWithScore } from "../models";
+import { favoriteBvids, getCandidateByBvid, listPreferredCreators, logSearchQuery, searchLocalCandidates, upsertCandidateVideo } from "../db";
+import type { CandidateVideo, CandidateItem } from "../models";
 import { sanitizeBvid, sanitizeMid, sanitizeNullableText, sanitizeText, sanitizeUrl } from "../sanitize";
-import { rankCandidate, sortByRank, tagsOf } from "./ranker";
 import type { NormalizedCandidate, RawSearchResult, SearchProvider } from "./types";
 import { getSearchProvider } from "./provider";
+import { followedFirst } from "./order";
+import { assertRateLimit, RateLimitError } from "../rateLimit";
+import { KernelRequestError } from "../kernelClient";
+import { searchSession, readSession, freezeLocalPool, frozenPage, commitPage, SearchSnapshotError, type FrozenSearchPage } from "./sessions";
+import { MAX_SEARCH_PAGES, pageLimit } from "./pagination";
+
+export class SearchProviderError extends Error {
+  constructor(message: string, public provider: string, public page: number, public retryAfterSeconds?: number, public searchId?: string) {
+    super(message);
+  }
+}
 
 export type SearchRequest = {
-  keyword: string;
-  useRemote: boolean;
-  limit: number;
-  page?: number;
-  appOwnerId?: string;
-  provider?: string;
-  externalOwnerId?: string;
-  profileId?: string;
-  searchProvider?: SearchProvider;
+  keyword: string; useRemote: boolean; limit: number; page?: number; appOwnerId?: string;
+  provider?: string; externalOwnerId?: string; profileId?: string; searchProvider?: SearchProvider; searchId?: string; sessionKey?: string;
+};
+export type SearchResponsePayload = {
+  provider: string; remoteUsed: boolean; source: "remote" | "local" | "direct";
+  page: number; limit: number; hasPreviousPage: boolean; hasNextPage: boolean;
+  candidates: CandidateItem[]; searchId: string; duplicatesRemoved: number; totalPages?: number; pageLimit: number; cached: boolean;
 };
 
-export type SearchResponsePayload = {
-  provider: string;
-  remoteUsed: boolean;
-  page: number;
-  limit: number;
-  hasPreviousPage: boolean;
-  hasNextPage: boolean;
-  candidates: CandidateWithScore[];
-  providerError?: string;
-};
+const pendingPages = new Map<string, Promise<FrozenSearchPage>>();
 
 export async function runSearch(request: SearchRequest): Promise<SearchResponsePayload> {
-  const keyword = sanitizeText(request.keyword, 200);
-  if (!keyword) {
-    throw new Error("请先输入关键词");
-  }
-  const limit = Math.max(1, Math.min(request.limit || 20, 50));
-  const page = Math.max(1, Math.min(Math.round(request.page || 1), 10));
-  const offset = request.useRemote ? 0 : (page - 1) * limit;
-  const poolLimit = Math.min(page * limit, 500);
+  const keyword = sanitizeText(request.keyword, 200).trim();
+  if (!keyword) throw new Error("请先输入关键词");
   const provider = request.searchProvider ?? getSearchProvider(request.provider);
-  const appOwnerId = request.appOwnerId || "local";
-  const preferredCreators = listPreferredCreators(appOwnerId);
+  const maximum = request.useRemote ? Math.min(provider.maxPageSize ?? 20, boundedInteger(Number(process.env.BILIBILI_SEARCH_LIMIT), 20, 1, 50)) : 50;
+  const limit = boundedInteger(request.limit, Math.min(20, maximum), 1, maximum);
+  const page = boundedInteger(request.page, 1, 1, MAX_SEARCH_PAGES);
+  const ownerId = request.appOwnerId || "local";
+  let session = searchSession({ ownerId, keyword, provider: provider.name, useRemote: request.useRemote, limit, sessionKey: request.sessionKey }, request.searchId);
   const directBvid = sanitizeBvid(keyword);
-  const directCandidate = directBvid && page === 1 ? directCandidateFromKeyword(keyword, directBvid, preferredCreators) : null;
-  const includeLocalDiscovery = !request.useRemote || page === 1;
-  const local = includeLocalDiscovery
-    ? mergeCandidates(
-        directCandidate ? [directCandidate] : [],
-        searchLocalCandidates(keyword, poolLimit),
-        searchFollowedCreatorCandidates(keyword, preferredCreators, poolLimit),
-        searchFavoriteCandidates(keyword, poolLimit, appOwnerId)
-      )
-    : [];
-  let candidates = [...local];
-  let providerError: string | undefined;
+  const source = directBvid ? "direct" : request.useRemote ? "remote" : "local";
+  let stored = frozenPage(session, page);
+  const cached = Boolean(stored);
 
-  if (request.useRemote) {
-    try {
-      const primarySearch = () =>
-        provider.searchVideos(keyword, {
-          limit: Math.min(limit, Number(process.env.BILIBILI_SEARCH_LIMIT || 20)),
-          page,
-          timeoutMs: Number(process.env.BILIBILI_SEARCH_TIMEOUT_MS || 8000),
-          externalOwnerId: request.externalOwnerId,
-          profileId: request.profileId
-        });
-      const creatorSearch = () =>
-        searchFollowedCreatorsRemote({
-          provider,
-          keyword,
-          preferredCreators,
-          request,
-          limit,
-          page
-        });
-      const [raw, creatorRaw] = provider.supportsConcurrentSearch
-        ? await Promise.all([primarySearch(), creatorSearch()])
-        : [await primarySearch(), await creatorSearch()];
-      const normalized = [...raw, ...creatorRaw].map((item) => normalizeRawSearchResult(item, keyword, provider.name));
-      const upserted = normalized.map((item) => upsertRankedCandidate(item, preferredCreators, keyword));
-      candidates = mergeCandidates(local, upserted);
-    } catch (error) {
-      providerError = sanitizeText(error);
+  if (!stored && source === "direct") {
+    const existing = getCandidateByBvid(directBvid);
+    const candidates = page !== 1 ? [] : existing ? [existing] : request.useRemote ? [saveCandidateMetadata(normalizeRawSearchResult({
+      bvid: directBvid, title: `Bilibili 视频 ${directBvid}`,
+    }, keyword, "direct_url"))] : [];
+    stored = commitPage(session, page, { candidates, hasNextPage: false, duplicatesRemoved: 0 }, 1);
+  } else if (!stored && source === "local") {
+    if (!session.localPool) session = freezeLocalPool(session, searchLocalCandidates(keyword, limit * MAX_SEARCH_PAGES + 1, 0, ownerId));
+    const pool = session.localPool!;
+    const candidates = pool.slice((page - 1) * limit, page * limit);
+    stored = commitPage(session, page, { candidates, hasNextPage: page * limit < pool.length, duplicatesRemoved: 0 }, session.totalPages);
+  } else if (!stored) {
+    const key = session.id + ":" + page;
+    let pending = pendingPages.get(key);
+    if (!pending) {
+      pending = (async () => {
+        try {
+          assertRateLimit(`app-search-remote:${ownerId}`, 12, 60_000);
+          const options = {
+            limit, page, timeoutMs: boundedInteger(Number(process.env.BILIBILI_SEARCH_TIMEOUT_MS), 8000, 1000, 30000),
+            externalOwnerId: request.externalOwnerId, profileId: request.profileId,
+          };
+          const response = provider.searchPage ? await provider.searchPage(keyword, options) : {
+            results: await provider.searchVideos(keyword, options), hasNextPage: undefined, totalPages: undefined,
+          };
+          const candidates: CandidateVideo[] = [];
+          const seen = new Set<string>();
+          let duplicatesRemoved = 0;
+          for (const raw of response.results.slice(0, limit)) {
+            let normalized: NormalizedCandidate;
+            try { normalized = normalizeRawSearchResult(raw, keyword, provider.name); } catch { continue; }
+            if (seen.has(normalized.bvid)) { duplicatesRemoved++; continue; }
+            seen.add(normalized.bvid);
+            candidates.push(saveCandidateMetadata(normalized));
+          }
+          return commitPage(session, page, {
+            candidates, duplicatesRemoved, hasNextPage: response.hasNextPage ?? response.results.length >= limit,
+          }, response.totalPages);
+        } catch (error) {
+          if (error instanceof SearchSnapshotError) throw error;
+          const message = sanitizeText(error instanceof Error ? error.message : error);
+          logSearchQuery(keyword, 0, false, { provider: provider.name, page, error: message });
+          throw new SearchProviderError(message, provider.name, page, error instanceof RateLimitError || error instanceof KernelRequestError ? error.retryAfterSeconds : undefined, session.id);
+        }
+      })().finally(() => pendingPages.delete(key));
+      pendingPages.set(key, pending);
     }
+    stored = await pending;
   }
 
-  const interactions = interactionCounts(candidates.map((candidate) => candidate.id), appOwnerId);
-  const favorites = favoriteBvids(candidates.map((candidate) => candidate.bvid), appOwnerId);
-  const allRanked = pinBvidFirst(sortByRank(candidates, keyword, preferredCreators, interactions), directBvid);
-  const pageItems = allRanked.slice(offset, offset + limit);
-  const ranked = pageItems
-    .map(({ candidate, scoreBreakdown, isPreferredCreator }) => {
-      updateCandidateScore(candidate.id, {
-        musicLikelihoodScore: scoreBreakdown.musicLikelihood,
-        preferredCreatorBoost: scoreBreakdown.preferredCreator,
-        finalScore: scoreBreakdown.final,
-        scoreBreakdownJson: JSON.stringify(scoreBreakdown)
-      });
-      return toCandidateWithScore(
-        {
-          ...candidate,
-          musicLikelihoodScore: scoreBreakdown.musicLikelihood,
-          preferredCreatorBoost: scoreBreakdown.preferredCreator,
-          finalScore: scoreBreakdown.final,
-          scoreBreakdownJson: JSON.stringify(scoreBreakdown)
-        },
-        isPreferredCreator,
-        favorites.has(candidate.bvid)
-      );
-    });
-
-  logSearchQuery(keyword, ranked.length, request.useRemote);
+  const frozen = stored!;
+  // Repair stale candidate IDs after an independent metadata-cache cleanup, without refetching/reordering pages.
+  const candidates = frozen.candidates.map((candidate) => {
+    const current = getCandidateByBvid(candidate.bvid);
+    return { ...candidate, id: current?.id ?? upsertCandidateVideo(candidate).id };
+  });
+  const followed = new Set(listPreferredCreators(ownerId).map((creator) => creator.biliMid));
+  const favorites = favoriteBvids(candidates.map((candidate) => candidate.bvid), ownerId);
+  const items = followedFirst(candidates.map((candidate) => toCandidateItem(candidate, followed.has(candidate.creatorMid || ""), favorites.has(candidate.bvid))), (item) => item.isPreferredCreator);
+  const latestSession = readSession(session.context, session.id);
+  const maximumPage = pageLimit(latestSession.totalPages);
+  logSearchQuery(keyword, items.length, source === "remote", { provider: source === "remote" ? provider.name : source, page });
   return {
-    provider: provider.name,
-    remoteUsed: request.useRemote,
-    page,
-    limit,
-    hasPreviousPage: page > 1,
-    hasNextPage: ranked.length === limit && page < 10,
-    candidates: ranked,
-    providerError
+    provider: source === "remote" ? provider.name : source, source, remoteUsed: source === "remote",
+    page, limit, hasPreviousPage: page > 1, hasNextPage: frozen.hasNextPage && page < maximumPage,
+    candidates: items, searchId: session.id, duplicatesRemoved: frozen.duplicatesRemoved,
+    totalPages: latestSession.totalPages, pageLimit: maximumPage, cached,
   };
 }
 
@@ -152,7 +130,7 @@ export function normalizeRawSearchResult(
     coverUrl: raw.coverUrl ? sanitizeUrl(raw.coverUrl) : null,
     durationSeconds: normalizeDuration(raw.durationSeconds),
     pubTime: normalizePubTime(raw.pubTime),
-    sourceUrl: raw.sourceUrl ? sanitizeUrl(raw.sourceUrl) : `https://www.bilibili.com/video/${bvid}`,
+    sourceUrl: `https://www.bilibili.com/video/${bvid}`,
     category: sanitizeNullableText(raw.category, 200),
     tags: Array.isArray(raw.tags) ? raw.tags.map((tag) => sanitizeText(tag, 80)).filter(Boolean) : [],
     searchKeyword: searchKeyword ? sanitizeText(searchKeyword, 200) : null,
@@ -160,134 +138,29 @@ export function normalizeRawSearchResult(
   };
 }
 
-export function upsertRankedCandidate(
-  candidate: NormalizedCandidate,
-  preferredCreators = listPreferredCreators(),
-  keyword = candidate.searchKeyword ?? ""
-): CandidateVideo {
-  const scoreBreakdown = rankCandidate(candidate, keyword, preferredCreators);
-  return upsertCandidateVideo({
-    ...candidate,
-    tagsJson: JSON.stringify(candidate.tags),
-    musicLikelihoodScore: scoreBreakdown.musicLikelihood,
-    preferredCreatorBoost: scoreBreakdown.preferredCreator,
-    finalScore: scoreBreakdown.final,
-    scoreBreakdownJson: JSON.stringify(scoreBreakdown)
-  });
+
+export function saveCandidateMetadata(candidate: NormalizedCandidate): CandidateVideo {
+  return upsertCandidateVideo({ ...candidate, tagsJson: JSON.stringify(candidate.tags) });
 }
 
-export function toCandidateWithScore(candidate: CandidateVideo, isPreferredCreator?: boolean, isFavorited = false): CandidateWithScore {
-  const scoreBreakdown = parseScoreBreakdown(candidate.scoreBreakdownJson);
-  return {
-    ...candidate,
-    scoreBreakdown,
-    tags: tagsOf(candidate),
-    isPreferredCreator: isPreferredCreator ?? candidate.preferredCreatorBoost > 0,
-    isFavorited
-  };
-}
-
-export function parseScoreBreakdown(value: string): CandidateWithScore["scoreBreakdown"] {
+export function toCandidateItem(candidate: CandidateVideo, isPreferredCreator = false, isFavorited = false): CandidateItem {
+  let tags: string[] = [];
   try {
-    const parsed = JSON.parse(value);
-    return {
-      textMatch: Number(parsed.textMatch ?? 0),
-      preferredCreator: Number(parsed.preferredCreator ?? 0),
-      musicLikelihood: Number(parsed.musicLikelihood ?? 0),
-      recency: Number(parsed.recency ?? 0),
-      interaction: Number(parsed.interaction ?? 0),
-      penalty: Number(parsed.penalty ?? 0),
-      final: Number(parsed.final ?? 0)
-    };
-  } catch {
-    return { textMatch: 0, preferredCreator: 0, musicLikelihood: 0, recency: 0, interaction: 0, penalty: 0, final: 0 };
-  }
+    const parsed = JSON.parse(candidate.tagsJson || "[]");
+    tags = Array.isArray(parsed) ? parsed.filter((tag): tag is string => typeof tag === "string") : [];
+  } catch { /* Malformed legacy tags are harmless. */ }
+  return { ...candidate, tags, isPreferredCreator, isFavorited };
 }
 
-function mergeCandidates(...groups: CandidateVideo[][]): CandidateVideo[] {
-  const byBvid = new Map<string, CandidateVideo>();
-  for (const item of groups.flat()) {
-    byBvid.set(item.bvid, item);
-  }
-  return Array.from(byBvid.values());
+export function toCandidateItems(candidates: CandidateVideo[], ownerId: string): CandidateItem[] {
+  const followed = new Set(listPreferredCreators(ownerId).map((creator) => creator.biliMid));
+  const favorites = favoriteBvids(candidates.map((candidate) => candidate.bvid), ownerId);
+  return candidates.map((candidate) => toCandidateItem(candidate, followed.has(candidate.creatorMid || ""), favorites.has(candidate.bvid)));
 }
 
-function directCandidateFromKeyword(
-  keyword: string,
-  bvid: string,
-  preferredCreators: ReturnType<typeof listPreferredCreators>
-): CandidateVideo {
-  const existing = getCandidateByBvid(bvid);
-  if (existing) {
-    return existing;
-  }
-  return upsertRankedCandidate(
-    normalizeRawSearchResult(
-      {
-        bvid,
-        title: `Bilibili 视频 ${bvid}`,
-        sourceUrl: `https://www.bilibili.com/video/${bvid}`,
-        tags: ["direct"]
-      },
-      bvid,
-      "direct_url"
-    ),
-    preferredCreators,
-    bvid
-  );
-}
-
-function pinBvidFirst<T extends { candidate: CandidateVideo }>(items: T[], bvid: string): T[] {
-  if (!bvid) {
-    return items;
-  }
-  return [...items].sort((left, right) => Number(right.candidate.bvid === bvid) - Number(left.candidate.bvid === bvid));
-}
-
-async function searchFollowedCreatorsRemote({
-  provider,
-  keyword,
-  preferredCreators,
-  request,
-  limit,
-  page
-}: {
-  provider: SearchProvider;
-  keyword: string;
-  preferredCreators: ReturnType<typeof listPreferredCreators>;
-  request: SearchRequest;
-  limit: number;
-  page: number;
-}): Promise<RawSearchResult[]> {
-  if (page !== 1 || !preferredCreators.length || provider.name === "mock") {
-    return [];
-  }
-  const searchCreator = async (creator: (typeof preferredCreators)[number]): Promise<RawSearchResult[]> => {
-    const creatorKeyword = `${keyword} ${creator.name}`.trim();
-    if (!creatorKeyword || creatorKeyword === keyword) {
-      return [];
-    }
-    try {
-      return await provider.searchVideos(creatorKeyword, {
-        limit: Math.min(6, limit),
-        page: 1,
-        timeoutMs: Math.min(Number(process.env.BILIBILI_SEARCH_TIMEOUT_MS || 8000), 6000),
-        externalOwnerId: request.externalOwnerId,
-        profileId: request.profileId
-      });
-    } catch {
-      // Followed-UP expansion is best-effort and must not hide the primary search result.
-      return [];
-    }
-  };
-  if (provider.supportsConcurrentSearch) {
-    return (await Promise.all(preferredCreators.slice(0, 2).map(searchCreator))).flat();
-  }
-  const results: RawSearchResult[] = [];
-  for (const creator of preferredCreators.slice(0, 2)) {
-    results.push(...(await searchCreator(creator)));
-  }
-  return results;
+function boundedInteger(value: unknown, fallback: number, min: number, max: number): number {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.min(max, Math.max(min, Math.floor(number))) : fallback;
 }
 
 function normalizeDuration(value: unknown): number | null {
@@ -303,7 +176,8 @@ function normalizePubTime(value: unknown): string | null {
     return null;
   }
   if (typeof value === "number") {
-    return new Date(value * 1000).toISOString();
+    const date = new Date(value * 1000);
+    return Number.isFinite(date.getTime()) ? date.toISOString() : null;
   }
   const timestamp = Date.parse(String(value));
   return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;

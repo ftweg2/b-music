@@ -1,12 +1,15 @@
+import { apiEndpoint, apiOptions, ApiError } from "@/lib/api";
 import { NextResponse } from "next/server";
 
 import { startDefaultKernelLogin } from "@/lib/kernelSession";
-import { sanitizeText } from "@/lib/sanitize";
+import { assertAccountContext } from "@/lib/appOwner";
+import { loginErrorResponse } from "@/lib/loginApi";
 
 export const runtime = "nodejs";
 
-export async function POST() {
+async function postHandler(request: Request) {
   try {
+    await assertAccountContext();
     const payload = await startDefaultKernelLogin();
     return NextResponse.json({
       loginSessionId: payload.loginSessionId,
@@ -19,6 +22,10 @@ export async function POST() {
       expiresInSeconds: payload.expiresInSeconds
     });
   } catch (error) {
-    return NextResponse.json({ error: sanitizeText(error) }, { status: 400 });
+    if (error instanceof ApiError) throw error;
+    return loginErrorResponse(error);
   }
 }
+
+export const POST = apiEndpoint("POST", postHandler);
+export const OPTIONS = apiOptions(["POST"]);

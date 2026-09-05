@@ -1,3 +1,4 @@
+import { apiEndpoint, apiOptions, ApiError } from "@/lib/api";
 import { NextResponse } from "next/server";
 
 import { getDatabase, markExpiredReadyTracks } from "@/lib/db";
@@ -6,7 +7,7 @@ import { API_VERSION } from "@/lib/apiCapabilities";
 
 export const runtime = "nodejs";
 
-export function GET() {
+function getHandler() {
   getDatabase();
   const expiredTracksMarked = markExpiredReadyTracks();
   return NextResponse.json({
@@ -19,3 +20,6 @@ export function GET() {
     expiredTracksMarked
   });
 }
+
+export const GET = apiEndpoint("GET", getHandler);
+export const OPTIONS = apiOptions(["GET"]);

@@ -1,54 +1,48 @@
-import { kernelBaseUrl } from "@/lib/kernelClient";
-import { providerMode } from "@/lib/search/provider";
+import { KernelLoginPanel } from "@/components/KernelLoginPanel";
+import { SettingsIcon, ServerIcon } from "@/components/Icons";
+
+export const dynamic = "force-dynamic";
 
 export default function SettingsPage() {
   return (
     <>
       <header className="pageHeader">
-        <h2>设置</h2>
-        <p>App 负责音乐库和播放体验；登录态、音频准备和临时 artifact 都由内核通过 HTTP 承担。</p>
+        <div className="pageTitleRow">
+          <div className="pageIcon neutral">
+            <SettingsIcon size={20} />
+          </div>
+          <span className="sectionKicker">SYSTEM & PLAYBACK</span>
+        </div>
+        <h1>播放与设置</h1>
+        <p>管理 Bilibili 登录与播放服务，让每一次聆听顺畅发生。</p>
       </header>
-      <section className="panel">
-        <table className="table">
-          <tbody>
-            <tr>
-              <th>应用</th>
-              <td>{process.env.NEXT_PUBLIC_APP_NAME || "bili-music-app"}</td>
-            </tr>
-            <tr>
-              <th>搜索源</th>
-              <td>{providerMode()}</td>
-            </tr>
-            <tr>
-              <th>内核地址</th>
-              <td>{kernelBaseUrl()}</td>
-            </tr>
-            <tr>
-              <th>账号模式</th>
-              <td>本地单账号模式</td>
-            </tr>
-            <tr>
-              <th>Track artifact TTL</th>
-              <td>{process.env.TRACK_ARTIFACT_TTL_SECONDS || "86400"} 秒</td>
-            </tr>
-            <tr>
-              <th>播放方式</th>
-              <td>App 只做 Range 流式代理，不保存音频文件</td>
-            </tr>
-            <tr>
-              <th>存储模式</th>
-              <td>SQLite，只存候选和 Track metadata</td>
-            </tr>
-          </tbody>
-        </table>
-      </section>
-      <section className="panel">
-        <h3 className="panelTitle">运行边界</h3>
-        <p className="note">
-          扫码登录会自动使用默认内核 profile。网页端和手机端访问同一个 App 服务时，共享同一个收藏歌曲和喜欢的 UP 列表。
-          App 只保存候选、收藏和 Track metadata；音频 artifact 留在内核，由 `/api/tracks/:id/stream` 代理给浏览器播放。
-        </p>
-      </section>
+
+      <div className="pageNarrow">
+        <KernelLoginPanel />
+
+        <section className="card settingsInfoCard">
+          <div className="cardSectionHeader compact">
+            <div className="sectionIcon"><ServerIcon size={18} /></div>
+            <div>
+              <span className="sectionKicker">PLAYBACK ENGINE</span>
+              <h3>内核运行模式</h3>
+            </div>
+          </div>
+          <div className="settingsProse">
+            <ul>
+              <li>
+                <strong>API 优先</strong>：通过 api_dash 准备可访问的音频，保留来源音轨；实际可用性取决于视频与内核服务。
+              </li>
+              <li>
+                <strong>自动策略</strong>：在播放器的设置中选择自动模式，内核会按顺序尝试支持的处理方式，失败时显示原因。
+              </li>
+              <li>
+                <strong>登录与隐私</strong>：登录状态仅保存在内核中。登录不改变原视频的访问权限，也不保证无损音质；应用只保存音乐元数据。
+              </li>
+            </ul>
+          </div>
+        </section>
+      </div>
     </>
   );
 }

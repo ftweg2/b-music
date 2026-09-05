@@ -70,8 +70,8 @@ class MseSourceBufferStrategy:
         try:
             video_url = normalize_video_url(context.url)
             managed = await manager.open_context(context.profile_id, add_mse_hook=True)
-            await managed.context.expose_binding("__biliCtfAudioSegment", receive_segment)
-            page = await managed.context.new_page()
+            page = await managed.new_page()
+            await page.expose_binding("__biliCtfAudioSegment", receive_segment)
             media_probe = CdpMediaProbe()
             await media_probe.attach(page)
             await page.goto(

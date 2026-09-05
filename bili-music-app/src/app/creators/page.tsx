@@ -1,11 +1,18 @@
 import { PreferredCreatorList } from "@/components/PreferredCreatorList";
+import { UsersIcon } from "@/components/Icons";
 
 export default function CreatorsPage() {
   return (
     <>
       <header className="pageHeader">
-        <h2>关注 UP</h2>
-        <p>搜索结果里点“关注 UP”最省事；手动添加时粘一个 UP 主页链接或 mid 就够了。</p>
+        <div className="pageTitleRow">
+          <div className="pageIcon mint">
+            <UsersIcon size={20} />
+          </div>
+          <span className="sectionKicker">PREFERRED CREATORS</span>
+        </div>
+        <h1>关注 UP 主</h1>
+        <p>保存喜欢的音乐创作者，随时访问他们的主页或搜索作品。</p>
       </header>
       <PreferredCreatorList />
     </>

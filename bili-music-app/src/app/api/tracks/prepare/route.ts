@@ -1,5 +1,7 @@
+import { apiEndpoint, apiOptions, ApiError, readJsonObject } from "@/lib/api";
 import { NextResponse } from "next/server";
 
+import { candidateReference, strategyInput } from "@/lib/apiInput";
 import { currentAppOwnerId } from "@/lib/appOwner";
 import { KernelRequestError } from "@/lib/kernelClient";
 import { ensureDefaultKernelProfile } from "@/lib/kernelSession";
@@ -9,17 +11,14 @@ import { sanitizeText } from "@/lib/sanitize";
 
 export const runtime = "nodejs";
 
-export async function POST(request: Request) {
+async function postHandler(request: Request) {
   try {
-    const body = await request.json();
+    const body = await readJsonObject(request);
     const appOwnerId = await currentAppOwnerId();
     const prepareInput = {
-      candidateId: Number(body.candidateId),
-      bvid: body.bvid,
-      appOwnerId,
-      strategyMode: body.strategyMode || body.strategy_mode,
-      strategy: body.strategy,
-      strategyOrder: body.strategyOrder || body.strategy_order
+      ...candidateReference(body),
+      ...strategyInput(body),
+      appOwnerId
     };
     const reusable = getReusablePreparedTrack(prepareInput);
     if (reusable) {
@@ -33,6 +32,7 @@ export async function POST(request: Request) {
     });
     return trackResponse(track);
   } catch (error) {
+    if (error instanceof ApiError) throw error;
     if (error instanceof KernelRequestError) {
       return NextResponse.json(
         { error: sanitizeText(error), code: "KERNEL_UNAVAILABLE", retryable: error.retryable },
@@ -60,3 +60,6 @@ function trackResponse(track: Parameters<typeof toTrackApiResource>[0]) {
     }
   );
 }
+
+export const POST = apiEndpoint("POST", postHandler);
+export const OPTIONS = apiOptions(["POST"]);

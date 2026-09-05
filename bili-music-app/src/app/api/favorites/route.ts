@@ -1,3 +1,6 @@
+import { apiEndpoint, apiOptions, ApiError, readJsonObject, queryInteger } from "@/lib/api";
+import { candidateReference } from "@/lib/apiInput";
+import { optionalString } from "@/lib/api";
 import { NextResponse } from "next/server";
 
 import {
@@ -9,23 +12,24 @@ import {
 } from "@/lib/db";
 import { currentAppOwnerId } from "@/lib/appOwner";
 import { clampNumber, sanitizeNullableText, sanitizeText } from "@/lib/sanitize";
-import { toCandidateWithScore } from "@/lib/search/cache";
+import { toCandidateItems } from "@/lib/search/cache";
 
 export const runtime = "nodejs";
 
-export async function GET(request: Request) {
+async function getHandler(request: Request) {
   const ownerId = await currentAppOwnerId();
   const url = new URL(request.url);
-  const limit = Math.round(clampNumber(url.searchParams.get("limit"), 1, 100, 100));
-  const offset = Math.round(clampNumber(url.searchParams.get("offset"), 0, 100_000, 0));
+  const limit = queryInteger(url.searchParams, "limit", 100, 1, 100);
+  const offset = queryInteger(url.searchParams, "offset", 0, 0, 100_000);
   const page = listFavoriteVideos(limit + 1, ownerId, offset);
   const hasMore = page.length > limit;
   const rows = page.slice(0, limit);
   const candidates = rows.map((row) => row.candidate);
   const favorites = favoriteBvids(candidates.map((candidate) => candidate.bvid), ownerId);
+  const decorated = new Map(toCandidateItems(candidates, ownerId).map((candidate) => [candidate.id, candidate]));
   const items = rows.map((row) => ({
     favorite: row.favorite,
-    candidate: toCandidateWithScore(row.candidate, undefined, favorites.has(row.candidate.bvid))
+    candidate: decorated.get(row.candidate.id)!
   }));
   return NextResponse.json({
     ownerId,
@@ -41,10 +45,12 @@ export async function GET(request: Request) {
   });
 }
 
-export async function POST(request: Request) {
+async function postHandler(request: Request) {
   try {
-    const body = await request.json();
-    const candidateId = Number(body.candidateId);
+    const body = await readJsonObject(request);
+    const reference = candidateReference(body);
+    const candidateId = reference.candidateId ?? NaN;
+    optionalString(body, "note", 500); optionalString(body, "mood", 80);
     const ownerId = await currentAppOwnerId();
     const candidate = getCandidateById(candidateId) || getCandidateByBvid(String(body.bvid || ""));
     if (!candidate) {
@@ -52,22 +58,27 @@ export async function POST(request: Request) {
     }
     const favorite = createFavoriteVideo(candidate.id, {
       externalOwnerId: ownerId,
-      note: sanitizeNullableText(body.note, 500),
-      mood: sanitizeNullableText(body.mood, 80)
+      ...(Object.hasOwn(body, "note") ? { note: sanitizeNullableText(body.note, 500) } : {}),
+      ...(Object.hasOwn(body, "mood") ? { mood: sanitizeNullableText(body.mood, 80) } : {})
     });
-    const candidateWithScore = toCandidateWithScore(candidate, undefined, true);
+    const itemCandidate = toCandidateItems([candidate], ownerId)[0];
     return NextResponse.json(
       {
         favorite,
-        candidate: candidateWithScore,
+        candidate: itemCandidate,
         item: {
           favorite,
-          candidate: candidateWithScore
+          candidate: itemCandidate
         }
       },
       { status: 201 }
     );
   } catch (error) {
+    if (error instanceof ApiError) throw error;
     return NextResponse.json({ error: sanitizeText(error) }, { status: 400 });
   }
 }
+
+export const GET = apiEndpoint("GET", getHandler);
+export const POST = apiEndpoint("POST", postHandler);
+export const OPTIONS = apiOptions(["GET","POST"]);

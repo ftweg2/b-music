@@ -48,7 +48,6 @@ function migrate(db: DatabaseSync): void {
       bili_mid TEXT NOT NULL,
       name TEXT NOT NULL,
       homepage_url TEXT,
-      priority_weight INTEGER NOT NULL DEFAULT 50,
       notes TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
@@ -71,15 +70,54 @@ function migrate(db: DatabaseSync): void {
       tags_json TEXT,
       search_keyword TEXT,
       source_provider TEXT NOT NULL,
-      music_likelihood_score REAL NOT NULL DEFAULT 0,
-      preferred_creator_boost REAL NOT NULL DEFAULT 0,
-      final_score REAL NOT NULL DEFAULT 0,
-      score_breakdown_json TEXT NOT NULL DEFAULT '{}',
       last_seen_at TEXT NOT NULL,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS api_mutation_receipts (
+      owner_id TEXT NOT NULL,
+      operation TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      request_hash TEXT NOT NULL,
+      response_json TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      PRIMARY KEY(owner_id, operation, idempotency_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_api_receipts_expiry ON api_mutation_receipts(expires_at);
+    CREATE TABLE IF NOT EXISTS playback_ranges (
+      owner_id TEXT NOT NULL,
+      bvid TEXT NOT NULL,
+      start_seconds REAL NOT NULL DEFAULT 0 CHECK(start_seconds >= 0),
+      end_seconds REAL CHECK(end_seconds IS NULL OR end_seconds > start_seconds),
+      revision INTEGER NOT NULL CHECK(revision >= 1),
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY(owner_id, bvid)
+    );
+    CREATE TABLE IF NOT EXISTS library_migrations (
+      migration_key TEXT PRIMARY KEY,
+      target_owner_id TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS search_sessions (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      context_key TEXT NOT NULL,
+      local_pool_json TEXT,
+      total_pages INTEGER,
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS search_session_pages (
+      search_id TEXT NOT NULL,
+      page INTEGER NOT NULL,
+      candidates_json TEXT NOT NULL,
+      has_next INTEGER NOT NULL,
+      duplicates_removed INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY(search_id, page),
+      FOREIGN KEY(search_id) REFERENCES search_sessions(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_search_sessions_owner ON search_sessions(owner_id, created_at DESC);
     CREATE TABLE IF NOT EXISTS search_query_logs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       keyword TEXT NOT NULL,
@@ -144,9 +182,32 @@ function migrate(db: DatabaseSync): void {
       FOREIGN KEY(candidate_id) REFERENCES candidate_videos(id) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS playlists (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      external_owner_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS playlist_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      playlist_id INTEGER NOT NULL,
+      candidate_id INTEGER,
+      bvid TEXT NOT NULL,
+      snapshot_json TEXT NOT NULL,
+      cover_url TEXT,
+      position INTEGER NOT NULL,
+      added_at TEXT NOT NULL,
+      UNIQUE(playlist_id, bvid),
+      FOREIGN KEY(playlist_id) REFERENCES playlists(id) ON DELETE CASCADE,
+      FOREIGN KEY(candidate_id) REFERENCES candidate_videos(id) ON DELETE SET NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_playlists_owner ON playlists(external_owner_id, updated_at DESC, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_playlist_items_order ON playlist_items(playlist_id, position, id);
     CREATE INDEX IF NOT EXISTS idx_candidate_title ON candidate_videos(title);
     CREATE INDEX IF NOT EXISTS idx_candidate_creator_mid ON candidate_videos(creator_mid);
-    CREATE INDEX IF NOT EXISTS idx_candidate_final_score ON candidate_videos(final_score);
+    CREATE INDEX IF NOT EXISTS idx_candidate_recency ON candidate_videos(last_seen_at DESC, id DESC);
     CREATE INDEX IF NOT EXISTS idx_interactions_candidate ON candidate_interactions(candidate_id);
     CREATE INDEX IF NOT EXISTS idx_favorite_owner ON favorite_videos(external_owner_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_favorite_candidate ON favorite_videos(candidate_id);
@@ -154,6 +215,9 @@ function migrate(db: DatabaseSync): void {
     CREATE INDEX IF NOT EXISTS idx_tracks_status ON tracks(status);
   `);
   ensureColumn(db, "candidate_interactions", "external_owner_id", "TEXT NOT NULL DEFAULT 'local'");
+  ensureColumn(db, "search_query_logs", "provider", "TEXT");
+  ensureColumn(db, "search_query_logs", "page", "INTEGER NOT NULL DEFAULT 1");
+  ensureColumn(db, "search_query_logs", "error_message", "TEXT");
   migrateFavoriteVideosToStableBvid(db);
   migrateTracksToOwners(db);
   ensureColumn(db, "tracks", "kernel_owner_id", "TEXT");
@@ -164,6 +228,10 @@ function migrate(db: DatabaseSync): void {
   db.exec("CREATE INDEX IF NOT EXISTS idx_favorite_owner_bvid ON favorite_videos(external_owner_id, bvid);");
   db.exec("CREATE INDEX IF NOT EXISTS idx_tracks_candidate ON tracks(candidate_id);");
   db.exec("CREATE INDEX IF NOT EXISTS idx_tracks_status ON tracks(status);");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_tracks_owner_recency ON tracks(external_owner_id,updated_at DESC,id DESC);");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_tracks_owner_status_recency ON tracks(external_owner_id,status,updated_at DESC,id DESC);");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_tracks_status_expiry ON tracks(status,expires_at);");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_tracks_owner_bvid_status ON tracks(external_owner_id,bvid,status,updated_at DESC);");
 }
 
 export function nowIso(): string {
@@ -175,7 +243,7 @@ export function listPreferredCreators(externalOwnerId = "local"): PreferredCreat
     .prepare(
       `SELECT * FROM preferred_creators
        WHERE external_owner_id = ?
-       ORDER BY priority_weight DESC, name ASC`
+       ORDER BY created_at DESC, id DESC`
     )
     .all(externalOwnerId);
   return rows.map(mapPreferredCreator);
@@ -184,17 +252,15 @@ export function listPreferredCreators(externalOwnerId = "local"): PreferredCreat
 export function createPreferredCreator(input: CreatePreferredCreatorInput): PreferredCreator {
   const now = nowIso();
   const externalOwnerId = input.externalOwnerId || "local";
-  const priorityWeight = input.priorityWeight ?? 50;
   getDatabase()
     .prepare(
       `INSERT INTO preferred_creators (
-        external_owner_id, bili_mid, name, homepage_url, priority_weight, notes, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        external_owner_id, bili_mid, name, homepage_url, notes, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(external_owner_id, bili_mid) DO UPDATE SET
         name=excluded.name,
         homepage_url=excluded.homepage_url,
-        priority_weight=excluded.priority_weight,
-        notes=excluded.notes,
+        notes=COALESCE(excluded.notes, preferred_creators.notes),
         updated_at=excluded.updated_at`
     )
     .run(
@@ -202,7 +268,6 @@ export function createPreferredCreator(input: CreatePreferredCreatorInput): Pref
       input.biliMid,
       input.name,
       input.homepageUrl ?? null,
-      priorityWeight,
       input.notes ?? null,
       now,
       now
@@ -222,7 +287,7 @@ export function deletePreferredCreator(id: number, externalOwnerId = "local"): b
 
 export function updatePreferredCreator(
   id: number,
-  values: Partial<Pick<CreatePreferredCreatorInput, "name" | "homepageUrl" | "priorityWeight" | "notes">>,
+  values: Partial<Pick<CreatePreferredCreatorInput, "name" | "homepageUrl" | "notes">>,
   externalOwnerId = "local"
 ): PreferredCreator | null {
   const existing = getDatabase()
@@ -235,16 +300,15 @@ export function updatePreferredCreator(
   const next = {
     name: values.name ?? current.name,
     homepageUrl: values.homepageUrl ?? current.homepageUrl,
-    priorityWeight: values.priorityWeight ?? current.priorityWeight,
-    notes: values.notes ?? current.notes
+    notes: values.notes === undefined ? current.notes : values.notes
   };
   getDatabase()
     .prepare(
       `UPDATE preferred_creators
-       SET name=?, homepage_url=?, priority_weight=?, notes=?, updated_at=?
+       SET name=?, homepage_url=?, notes=?, updated_at=?
        WHERE id=? AND external_owner_id=?`
     )
-    .run(next.name, next.homepageUrl, next.priorityWeight, next.notes, nowIso(), id, externalOwnerId);
+    .run(next.name, next.homepageUrl, next.notes, nowIso(), id, externalOwnerId);
   const updated = getDatabase()
     .prepare("SELECT * FROM preferred_creators WHERE id=? AND external_owner_id=?")
     .get(id, externalOwnerId);
@@ -266,27 +330,23 @@ export function upsertCandidateVideo(input: CandidateUpsertInput): CandidateVide
       `INSERT INTO candidate_videos (
         bvid, aid, title, description, creator_mid, creator_name, cover_url,
         duration_seconds, pub_time, source_url, category, tags_json, search_keyword,
-        source_provider, music_likelihood_score, preferred_creator_boost, final_score,
-        score_breakdown_json, last_seen_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        source_provider, last_seen_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(bvid) DO UPDATE SET
-        aid=excluded.aid,
-        title=excluded.title,
-        description=excluded.description,
-        creator_mid=excluded.creator_mid,
-        creator_name=excluded.creator_name,
-        cover_url=excluded.cover_url,
-        duration_seconds=excluded.duration_seconds,
-        pub_time=excluded.pub_time,
+        aid=COALESCE(excluded.aid, candidate_videos.aid),
+        title=CASE WHEN excluded.title=excluded.bvid OR excluded.title LIKE 'Bilibili 视频 %'
+          THEN candidate_videos.title ELSE excluded.title END,
+        description=COALESCE(excluded.description, candidate_videos.description),
+        creator_mid=COALESCE(excluded.creator_mid, candidate_videos.creator_mid),
+        creator_name=COALESCE(excluded.creator_name, candidate_videos.creator_name),
+        cover_url=COALESCE(excluded.cover_url, candidate_videos.cover_url),
+        duration_seconds=COALESCE(excluded.duration_seconds, candidate_videos.duration_seconds),
+        pub_time=COALESCE(excluded.pub_time, candidate_videos.pub_time),
         source_url=excluded.source_url,
-        category=excluded.category,
-        tags_json=excluded.tags_json,
-        search_keyword=excluded.search_keyword,
+        category=COALESCE(excluded.category, candidate_videos.category),
+        tags_json=CASE WHEN excluded.tags_json IS NULL OR excluded.tags_json='[]' THEN candidate_videos.tags_json ELSE excluded.tags_json END,
+        search_keyword=COALESCE(excluded.search_keyword, candidate_videos.search_keyword),
         source_provider=excluded.source_provider,
-        music_likelihood_score=excluded.music_likelihood_score,
-        preferred_creator_boost=excluded.preferred_creator_boost,
-        final_score=excluded.final_score,
-        score_breakdown_json=excluded.score_breakdown_json,
         last_seen_at=excluded.last_seen_at,
         updated_at=excluded.updated_at`
     )
@@ -305,10 +365,6 @@ export function upsertCandidateVideo(input: CandidateUpsertInput): CandidateVide
       input.tagsJson,
       input.searchKeyword,
       input.sourceProvider,
-      input.musicLikelihoodScore,
-      input.preferredCreatorBoost,
-      input.finalScore,
-      input.scoreBreakdownJson,
       lastSeenAt,
       now,
       now
@@ -317,87 +373,19 @@ export function upsertCandidateVideo(input: CandidateUpsertInput): CandidateVide
   return mapCandidateVideo(row);
 }
 
-export function updateCandidateScore(
-  id: number,
-  values: Pick<CandidateVideo, "musicLikelihoodScore" | "preferredCreatorBoost" | "finalScore" | "scoreBreakdownJson">
-): void {
-  getDatabase()
-    .prepare(
-      `UPDATE candidate_videos
-       SET music_likelihood_score=?, preferred_creator_boost=?, final_score=?,
-           score_breakdown_json=?, updated_at=?
-       WHERE id=?`
-    )
-    .run(
-      values.musicLikelihoodScore,
-      values.preferredCreatorBoost,
-      values.finalScore,
-      values.scoreBreakdownJson,
-      nowIso(),
-      id
-    );
-}
-
-export function searchLocalCandidates(keyword: string, limit: number): CandidateVideo[] {
-  const like = `%${keyword.trim()}%`;
-  const rows = getDatabase()
-    .prepare(
-      `SELECT * FROM candidate_videos
-       WHERE source_provider <> 'mock'
-         AND (title LIKE ? OR description LIKE ? OR tags_json LIKE ? OR creator_name LIKE ?)
-       ORDER BY final_score DESC, last_seen_at DESC
-       LIMIT ?`
-    )
-    .all(like, like, like, like, limit);
-  return rows.map(mapCandidateVideo);
-}
-
-export function searchFollowedCreatorCandidates(keyword: string, creators: PreferredCreator[], limit: number): CandidateVideo[] {
-  const mids = creators.map((creator) => creator.biliMid).filter(Boolean).slice(0, 30);
-  if (!mids.length) {
-    return [];
-  }
-  const like = `%${keyword.trim()}%`;
-  const placeholders = mids.map(() => "?").join(",");
-  const rows = getDatabase()
-    .prepare(
-      `SELECT * FROM candidate_videos
-       WHERE source_provider <> 'mock'
-         AND creator_mid IN (${placeholders})
-         AND (? = '%%' OR title LIKE ? OR description LIKE ? OR tags_json LIKE ?)
-       ORDER BY final_score DESC, last_seen_at DESC
-       LIMIT ?`
-    )
-    .all(...mids, like, like, like, like, limit);
-  return rows.map(mapCandidateVideo);
-}
-
-export function searchFavoriteCandidates(keyword: string, limit: number, externalOwnerId = "local"): CandidateVideo[] {
-  const like = `%${keyword.trim()}%`;
-  const rows = getDatabase()
-    .prepare(
-      `SELECT candidate_videos.* FROM candidate_videos
-       INNER JOIN favorite_videos ON favorite_videos.bvid = candidate_videos.bvid
-       WHERE favorite_videos.external_owner_id = ?
-         AND candidate_videos.source_provider <> 'mock'
-         AND (? = '%%' OR candidate_videos.title LIKE ? OR candidate_videos.description LIKE ? OR candidate_videos.tags_json LIKE ?)
-       ORDER BY favorite_videos.created_at DESC
-       LIMIT ?`
-    )
-    .all(externalOwnerId, like, like, like, like, limit);
-  return rows.map(mapCandidateVideo);
-}
-
-export function listRecommendationCandidates(limit: number): CandidateVideo[] {
-  const rows = getDatabase()
-    .prepare(
-      `SELECT * FROM candidate_videos
-       WHERE source_provider <> 'mock'
-       ORDER BY final_score DESC, last_seen_at DESC
-       LIMIT ?`
-    )
-    .all(limit);
-  return rows.map(mapCandidateVideo);
+// Match every literal search term; "%" and "_" are not wildcards entered by users.
+export function searchLocalCandidates(keyword: string, limit: number, offset = 0, preferredOwnerId?: string): CandidateVideo[] {
+  const terms = keyword.trim().split(/\s+/).filter(Boolean).slice(0, 12);
+  if (!terms.length) return [];
+  const fields = ["title", "description", "creator_name", "tags_json", "bvid"];
+  const conditions = terms.map(() => "(" + fields.map((field) => field + " LIKE ? ESCAPE '\\'").join(" OR ") + ")");
+  const values = terms.flatMap((term) => fields.map(() => "%" + term.replace(/[\\%_]/g, "\\$&") + "%"));
+  return getDatabase()
+    .prepare("SELECT * FROM candidate_videos WHERE source_provider <> 'mock' AND " + conditions.join(" AND ") +
+      " ORDER BY " + (preferredOwnerId ? "EXISTS (SELECT 1 FROM preferred_creators WHERE external_owner_id=? AND bili_mid=candidate_videos.creator_mid) DESC, " : "") +
+      "last_seen_at DESC, id DESC LIMIT ? OFFSET ?")
+    .all(...values, ...(preferredOwnerId ? [preferredOwnerId] : []), limit, Math.max(0, offset))
+    .map(mapCandidateVideo);
 }
 
 export function getCandidateById(id: number): CandidateVideo | null {
@@ -456,8 +444,8 @@ export function createFavoriteVideo(
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(external_owner_id, bvid) DO UPDATE SET
         candidate_id=excluded.candidate_id,
-        note=excluded.note,
-        mood=excluded.mood,
+        note=CASE WHEN ?=1 THEN excluded.note ELSE favorite_videos.note END,
+        mood=CASE WHEN ?=1 THEN excluded.mood ELSE favorite_videos.mood END,
         title_snapshot=excluded.title_snapshot,
         source_url_snapshot=excluded.source_url_snapshot,
         creator_mid_snapshot=COALESCE(excluded.creator_mid_snapshot, favorite_videos.creator_mid_snapshot),
@@ -489,7 +477,9 @@ export function createFavoriteVideo(
       favoriteSnapshotQuality(candidate),
       now,
       now,
-      now
+      now,
+      input.note !== undefined ? 1 : 0,
+      input.mood !== undefined ? 1 : 0
     );
   const row = getDatabase()
     .prepare("SELECT * FROM favorite_videos WHERE external_owner_id=? AND bvid=?")
@@ -584,11 +574,11 @@ export function favoriteBvids(bvids: string[], externalOwnerId = "local"): Set<s
   return new Set(rows.map((row) => String(read(row, "bvid"))));
 }
 
-export function logSearchQuery(keyword: string, resultCount: number, remoteUsed: boolean): SearchQueryLog {
+export function logSearchQuery(keyword: string, resultCount: number, remoteUsed: boolean, detail: { provider?: string; page?: number; error?: string } = {}): SearchQueryLog {
   const now = nowIso();
   const result = getDatabase()
-    .prepare("INSERT INTO search_query_logs (keyword, result_count, remote_used, created_at) VALUES (?, ?, ?, ?)")
-    .run(keyword, resultCount, remoteUsed ? 1 : 0, now);
+    .prepare("INSERT INTO search_query_logs (keyword, result_count, remote_used, created_at, provider, page, error_message) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .run(keyword, resultCount, remoteUsed ? 1 : 0, now, detail.provider ?? null, detail.page ?? 1, detail.error ?? null);
   return {
     id: Number(result.lastInsertRowid),
     keyword,
@@ -850,7 +840,6 @@ function mapPreferredCreator(row: unknown): PreferredCreator {
     biliMid: String(read(row, "bili_mid")),
     name: String(read(row, "name")),
     homepageUrl: nullableString(read(row, "homepage_url")),
-    priorityWeight: Number(read(row, "priority_weight")),
     notes: nullableString(read(row, "notes")),
     createdAt: String(read(row, "created_at")),
     updatedAt: String(read(row, "updated_at"))
@@ -874,10 +863,6 @@ function mapCandidateVideo(row: unknown): CandidateVideo {
     tagsJson: nullableString(read(row, "tags_json")),
     searchKeyword: nullableString(read(row, "search_keyword")),
     sourceProvider: String(read(row, "source_provider")),
-    musicLikelihoodScore: Number(read(row, "music_likelihood_score")),
-    preferredCreatorBoost: Number(read(row, "preferred_creator_boost")),
-    finalScore: Number(read(row, "final_score")),
-    scoreBreakdownJson: String(read(row, "score_breakdown_json")),
     lastSeenAt: String(read(row, "last_seen_at")),
     createdAt: String(read(row, "created_at")),
     updatedAt: String(read(row, "updated_at"))
@@ -924,10 +909,6 @@ function hydrateCandidateFromFavorite(favorite: FavoriteVideo): CandidateVideo {
     tagsJson: favorite.tagsJsonSnapshot || "[]",
     searchKeyword: null,
     sourceProvider: "favorite_snapshot",
-    musicLikelihoodScore: 0,
-    preferredCreatorBoost: 0,
-    finalScore: 0,
-    scoreBreakdownJson: "{}",
     lastSeenAt: nowIso()
   });
 }

@@ -20,15 +20,7 @@ Force mode runs only the specified strategy. It does not fall back.
 
 ## Auto Mode
 
-Auto mode chooses order from:
-
-- user-provided `strategy_order`, if present
-- default order
-- historical success rate
-- recent failure reason
-- average duration
-- whether the profile is logged in
-- context hints
+Auto mode follows the explicit `strategy_order` exactly (deduplicated), or the default order when none is supplied. An explicit list is an allowlist: omitted strategies are never appended. Empty and unavailable explicit strategies are rejected. Historical metrics remain diagnostics only and do not score or reorder strategies.
 
 Default order:
 

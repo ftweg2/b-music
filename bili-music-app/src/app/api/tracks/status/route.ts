@@ -1,16 +1,17 @@
+import { apiEndpoint, apiOptions, ApiError, readJsonObject, positiveId as apiPositiveId } from "@/lib/api";
 import { NextResponse } from "next/server";
 
 import { currentAppOwnerId } from "@/lib/appOwner";
 import { DEFAULT_TRACK_POLL_AFTER_MS, MAX_TRACK_STATUS_BATCH } from "@/lib/apiCapabilities";
 import { getSyncedTracks } from "@/lib/tracks";
-import { toTrackApiResource } from "@/lib/trackApi";
+import { toTrackApiResources } from "@/lib/trackApi";
 import { sanitizeText } from "@/lib/sanitize";
 
 export const runtime = "nodejs";
 
-export async function POST(request: Request) {
+async function postHandler(request: Request) {
   try {
-    const body = await request.json();
+    const body = await readJsonObject(request);
     const trackIds = normalizeTrackIds(body.trackIds ?? body.track_ids);
     if (!trackIds.length) {
       return NextResponse.json(
@@ -31,7 +32,7 @@ export async function POST(request: Request) {
 
     const ownerId = await currentAppOwnerId();
     const synced = await getSyncedTracks(trackIds, ownerId);
-    const tracks = synced.filter((track) => track !== null).map(toTrackApiResource);
+    const tracks = toTrackApiResources(synced.filter((track) => track !== null));
     const foundIds = new Set(tracks.map((track) => track.id));
     const missingTrackIds = trackIds.filter((trackId) => !foundIds.has(trackId));
     const stillPreparing = tracks.some((track) => track.status === "preparing");
@@ -46,6 +47,7 @@ export async function POST(request: Request) {
       }
     );
   } catch (error) {
+    if (error instanceof ApiError) throw error;
     return NextResponse.json(
       { error: sanitizeText(error), code: "INVALID_REQUEST" },
       { status: 400 }
@@ -58,8 +60,10 @@ function normalizeTrackIds(value: unknown): number[] {
   return Array.from(
     new Set(
       value
-        .map(Number)
-        .filter((id) => Number.isSafeInteger(id) && id > 0)
+        .map((value, index) => apiPositiveId(value, `trackIds[${index}]`))
     )
   );
 }
+
+export const POST = apiEndpoint("POST", postHandler);
+export const OPTIONS = apiOptions(["POST"]);

@@ -1,98 +1,166 @@
 "use client";
+import { accountFetch } from "@/lib/accountClient";
 
 import { useEffect, useState } from "react";
-
+import { LIBRARY_CHANGE_EVENT, notifyLibraryChange } from "@/lib/libraryEvents";
+import { ACCOUNT_CHANGE_EVENT } from "@/lib/accountEvents";
 import type { PreferredCreator } from "@/lib/models";
 import { PreferredCreatorForm } from "./PreferredCreatorForm";
+import { UserCheckIcon, UsersIcon, ExternalLinkIcon, TrashIcon } from "./Icons";
 
 export function PreferredCreatorList() {
   const [creators, setCreators] = useState<PreferredCreator[]>([]);
-  const [message, setMessage] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
-  async function load() {
-    const response = await fetch("/api/creators", { cache: "no-store" });
-    const payload = await response.json();
-    setCreators(payload.creators || []);
-  }
-
-  async function remove(id: number) {
-    const response = await fetch(`/api/creators/${id}`, { method: "DELETE" });
-    setMessage(response.ok ? "已删除" : "删除失败");
-    await load();
-  }
-
-  async function updateWeight(creator: PreferredCreator, priorityWeight: number) {
-    const response = await fetch(`/api/creators/${creator.id}`, {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ priorityWeight })
-    });
-    setMessage(response.ok ? "权重已更新" : "更新失败");
-    await load();
+  async function loadCreators() {
+    setLoading(true);
+    setError("");
+    try {
+      const response = await accountFetch("/api/creators");
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(String(payload.error || "加载关注 UP 失败"));
+      }
+      setCreators(payload.creators || []);
+    } catch (err) {
+      setError(String(err instanceof Error ? err.message : err));
+    } finally {
+      setLoading(false);
+    }
   }
 
   useEffect(() => {
-    void load();
+    void loadCreators();
+    const changed=()=>{setCreators([]);void loadCreators();};
+    const library=()=>void loadCreators();
+    window.addEventListener(ACCOUNT_CHANGE_EVENT,changed);window.addEventListener(LIBRARY_CHANGE_EVENT,library);
+    return()=>{window.removeEventListener(ACCOUNT_CHANGE_EVENT,changed);window.removeEventListener(LIBRARY_CHANGE_EVENT,library);};
   }, []);
 
+  async function removeCreator(id: number, name: string) {
+    if (!window.confirm(`确定取消关注「${name}」吗？`)) {
+      return;
+    }
+    try {
+      const response = await accountFetch(`/api/creators/${id}`, { method: "DELETE" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(String(payload.error || "删除失败"));
+      }
+      const removed = creators.find((creator) => creator.id === id);
+      if (removed) notifyLibraryChange({ kind: "creator", biliMid: removed.biliMid, followed: false });
+      setCreators((prev) => prev.filter((creator) => creator.id !== id));
+    } catch (err) {
+      alert(String(err instanceof Error ? err.message : err));
+    }
+  }
+
   return (
-    <>
-      <PreferredCreatorForm onCreated={load} />
-      <section className="panel">
-        <div className="row">
-          <h3 className="panelTitle">已关注 UP</h3>
-          <span className="note">{message}</span>
+    <div className="pageNarrow pageNarrowWide">
+      <PreferredCreatorForm onCreated={() => void loadCreators()} />
+
+      <section className="card creatorListCard">
+        <div className="cardToolbar">
+          <div className="cardToolbarTitle">
+            <UsersIcon size={18} />
+            <div>
+              <span className="sectionKicker">YOUR CREATORS</span>
+              <h3>已关注的音乐 UP 主</h3>
+            </div>
+            <span className="badge">{creators.length} 位</span>
+          </div>
+
+          <button
+            type="button"
+            className="secondary"
+            onClick={() => void loadCreators()}
+          >
+            刷新
+          </button>
         </div>
-        {creators.length ? (
-          <div className="tableWrap">
+
+        {error ? (
+          <div className="errorText listMessage">{error}</div>
+        ) : loading ? (
+          <div className="listMessage">
+            正在拉取关注 UP 主列表...
+          </div>
+        ) : creators.length === 0 ? (
+          <div className="empty">
+            <UserCheckIcon size={32} style={{ opacity: 0.35 }} />
+            <strong>还没有关注的 UP 主</strong>
+            <span>可以从搜索结果快速关注，也可以在上方手动添加</span>
+          </div>
+        ) : (
+          <div className="tableWrapper">
             <table className="table">
               <thead>
                 <tr>
-                  <th>昵称</th>
-                  <th>关注强度</th>
-                  <th>主页</th>
-                  <th>操作</th>
+                  <th style={{ width: "35%" }}>UP 主</th>
+                  <th style={{ width: "25%" }}>UID / MID</th>
+                  <th style={{ width: "20%" }}>作品</th>
+                  <th style={{ width: "20%", textAlign: "right" }}>操作</th>
                 </tr>
               </thead>
               <tbody>
                 {creators.map((creator) => (
                   <tr key={creator.id}>
                     <td>
-                      <strong>{creator.name}</strong>
-                      <div className="note">mid {creator.biliMid}</div>
+                      <div className="creatorIdentity">
+                        <div className="creatorAvatar">
+                          {creator.name.slice(0, 1).toUpperCase()}
+                        </div>
+                        <div>
+                          <div className="creatorName">
+                            {creator.name}
+                          </div>
+                          {creator.notes && (
+                            <small className="creatorNotes">
+                              {creator.notes}
+                            </small>
+                          )}
+                        </div>
+                      </div>
                     </td>
                     <td>
-                      <input
-                        type="number"
-                        min={0}
-                        max={100}
-                        defaultValue={creator.priorityWeight}
-                        onBlur={(event) => updateWeight(creator, Number(event.target.value))}
-                      />
+                      <code className="creatorMid">
+                        {creator.biliMid}
+                      </code>
                     </td>
                     <td>
-                      {creator.homepageUrl ? (
-                        <a href={creator.homepageUrl} target="_blank" rel="noreferrer">
-                          打开
+                      <a className="textLink" href={`/search?q=${encodeURIComponent(creator.name)}`}>搜索作品 ↗</a>
+                    </td>
+                    <td style={{ textAlign: "right" }}>
+                      <div className="tableActions">
+                        <a
+                          className="buttonLink secondary"
+                          href={creator.homepageUrl || `https://space.bilibili.com/${creator.biliMid}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          title="访问 Bilibili 个人空间"
+                        >
+                          <ExternalLinkIcon size={12} />
+                          空间
                         </a>
-                      ) : (
-                        "-"
-                      )}
-                    </td>
-                    <td>
-                      <button type="button" className="danger" onClick={() => remove(creator.id)}>
-                        删除
-                      </button>
+                        <button
+                          type="button"
+                          className="ghost"
+                          onClick={() => void removeCreator(creator.id, creator.name)}
+                          title="取消关注"
+                        >
+                          <TrashIcon size={12} />
+                          取消
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-        ) : (
-          <div className="empty">还没有关注 UP。可以在搜索结果卡片里点“关注 UP”，也可以手动添加。</div>
         )}
       </section>
-    </>
+    </div>
   );
 }

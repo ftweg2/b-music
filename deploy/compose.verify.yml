@@ -1,0 +1,23 @@
+services:
+  app:
+    ports: !override ["127.0.0.1:3100:3000"]
+    environment:
+      B_MUSIC_HTTP_FIXTURE: isolated-only
+      NODE_OPTIONS: --max-old-space-size=128 --import /qa/container-preload.mjs
+      APP_OWNER_ID: http-fixture
+      KERNEL_EXTERNAL_OWNER_ID: http-fixture
+      APP_LIBRARY_MODE: ${QA_LIBRARY_MODE:-account}
+    volumes: !override
+      - qa-app:/data
+      - ../tests/container-preload.mjs:/qa/container-preload.mjs:ro
+  kernel:
+    ports: !override ["127.0.0.1:8100:8000"]
+    environment:
+      B_MUSIC_HTTP_FIXTURE: isolated-only
+      KERNEL_DATA_DIR: /tmp/b-music-http-image
+      LOGIN_POLL_INTERVAL_SECONDS: "1"
+      NETWORK_CAPTURE_MS: "1000"
+    volumes: !override []
+    command: [python, -m, uvicorn, app.tests.http_fixture:app, --host, 0.0.0.0, --port, "8000"]
+volumes:
+  qa-app:

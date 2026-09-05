@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import math
 import time
 import uuid
 from typing import Any
@@ -12,8 +14,8 @@ from app.profile_manager import (
     ProfileNotFoundError,
     ProfileOwnershipError,
     get_profile,
-    lock_profile,
-    release_profile_lock,
+    acquire_profile_reader,
+    release_profile_reader,
     verify_profile_owner,
 )
 from app.bilibili.bvid import parse_bvid
@@ -24,7 +26,10 @@ _SEARCH_BUCKETS: dict[str, list[float]] = {}
 
 
 class KernelSearchError(RuntimeError):
-    pass
+    def __init__(self, message: str, status_code: int = 502, retry_after: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.retry_after = retry_after
 
 
 async def search_videos_with_profile(
@@ -35,6 +40,7 @@ async def search_videos_with_profile(
     limit: int,
     page: int = 1,
     settings: Settings | None = None,
+    timeout_seconds: float = 8.0,
 ) -> dict[str, object]:
     settings = settings or get_settings()
     validate_external_owner_id(external_owner_id)
@@ -44,42 +50,87 @@ async def search_videos_with_profile(
 
     safe_keyword = sanitize_text(keyword, 200).strip()
     if not safe_keyword:
-        raise KernelSearchError("keyword is required")
+        raise KernelSearchError("keyword is required", 400)
 
-    lock_id = f"search_{uuid.uuid4().hex[:16]}"
-    lock_profile(profile_id, lock_id, settings)
+    lease_id = acquire_profile_reader(profile_id, external_owner_id, settings)
     managed = None
     try:
-        profile = get_profile(profile_id, settings)
-        managed = await BrowserContextManager(settings).open_context(profile_id)
-        url = _search_url(safe_keyword, min(max(limit, 1), 50), min(max(page, 1), 10))
-        response = await managed.context.request.get(
-            url,
-            timeout=int(settings.request_timeout_seconds * 1000),
-            headers={
-                "accept": "application/json,text/plain,*/*",
-                "referer": "https://www.bilibili.com/",
-            },
-        )
-        if response.status >= 400:
-            raise KernelSearchError(f"Bilibili search HTTP {response.status}")
-        payload = await response.json()
-        results = payload.get("data", {}).get("result", [])
-        if not isinstance(results, list):
-            raise KernelSearchError(f"Bilibili search returned no video results: {sanitize_text(payload.get('message'))}")
-        logged_in = profile.get("login_status") == LoginStatus.LOGGED_IN
-        return {
-            "provider": "kernel_bilibili",
-            "profile_id": profile_id,
-            "logged_in": logged_in,
-            "results": [_normalize_result(item) for item in results if isinstance(item, dict)][:limit],
-        }
+        async with asyncio.timeout(min(30.0, max(1.0, timeout_seconds))):
+            profile = get_profile(profile_id, settings)
+            managed = await BrowserContextManager(settings).open_context(profile_id)
+            safe_limit = min(max(limit, 1), 20)
+            safe_page = min(max(page, 1), 10)
+            response = await managed.context.request.get(
+                _search_url(safe_keyword, safe_limit, safe_page),
+                timeout=int(min(settings.request_timeout_seconds, timeout_seconds) * 1000),
+                headers={"accept": "application/json,text/plain,*/*", "referer": "https://www.bilibili.com/"},
+            )
+            if response.status >= 400:
+                raise KernelSearchError(f"Bilibili search HTTP {response.status}")
+            payload = await response.json()
+            results, has_next_page = parse_search_payload(payload, safe_page, safe_limit)
+            return {
+                "provider": "kernel_bilibili",
+                "profile_id": profile_id,
+                "logged_in": profile.get("login_status") == LoginStatus.LOGGED_IN,
+                "results": results,
+                "has_next_page": has_next_page,
+                "total_pages": search_total_pages(payload),
+            }
+    except TimeoutError as exc:
+        raise KernelSearchError("search timed out; retry or use public search") from exc
     finally:
         try:
             if managed is not None:
-                await managed.close()
+                try:
+                    async with asyncio.timeout(3):
+                        await managed.close()
+                except TimeoutError:
+                    pass
         finally:
-            release_profile_lock(profile_id, lock_id, settings)
+            release_profile_reader(profile_id, lease_id, settings)
+
+
+def search_total_pages(payload: object) -> int | None:
+    data = payload.get("data") if isinstance(payload, dict) else None
+    value = data.get("numPages") if isinstance(data, dict) else None
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        pages = int(value)
+    except (ValueError, TypeError, OverflowError):
+        return None
+    if pages < 0 or (isinstance(value, float) and not value.is_integer()):
+        return None
+    if pages == 0 and data.get("result"):
+        return None
+    return pages
+
+
+def parse_search_payload(payload: object, page: int, limit: int) -> tuple[list[dict[str, object]], bool]:
+    if not isinstance(payload, dict) or payload.get("code", 0) != 0:
+        message = payload.get("message", "invalid response") if isinstance(payload, dict) else "invalid response"
+        raise KernelSearchError(f"Bilibili search failed: {sanitize_text(message)}")
+    data = payload.get("data")
+    if not isinstance(data, dict) or not isinstance(data.get("result"), list):
+        raise KernelSearchError("Bilibili search returned invalid results")
+    raw = data["result"]
+    results = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            normalized = _normalize_result(item)
+        except (ValueError, TypeError, OverflowError, OSError):
+            continue
+        bvid = str(normalized["bvid"])
+        if bvid and bvid not in seen:
+            seen.add(bvid)
+            results.append(normalized)
+    total_pages = search_total_pages(payload)
+    has_more = page < total_pages if total_pages is not None else len(raw) >= limit
+    return results[:limit], has_more and page < 10
 
 
 def _search_url(keyword: str, limit: int, page: int = 1) -> str:
@@ -102,7 +153,8 @@ def _assert_profile_search_rate(profile_id: str) -> None:
     limit = 10
     timestamps = [stamp for stamp in _SEARCH_BUCKETS.get(profile_id, []) if now - stamp < window_seconds]
     if len(timestamps) >= limit:
-        raise KernelSearchError("search rate limit exceeded; wait before searching again")
+        retry_after = max(1, math.ceil(window_seconds - (now - timestamps[0])))
+        raise KernelSearchError("search rate limit exceeded; wait before searching again", 429, retry_after)
     timestamps.append(now)
     _SEARCH_BUCKETS[profile_id] = timestamps
     if len(_SEARCH_BUCKETS) > 1024:
@@ -156,11 +208,16 @@ def _strip_html(value: str) -> str:
 
 def _parse_duration(value: object) -> int | None:
     if isinstance(value, (int, float)):
-        return max(0, int(value))
+        return max(0, int(value)) if math.isfinite(value) else None
     text = str(value or "").strip()
     if not text:
         return None
-    parts = [int(part) for part in text.split(":") if part.isdigit()]
+    segments = text.split(":")
+    if len(segments) not in (2, 3) or not all(part.isdigit() for part in segments):
+        return None
+    parts = [int(part) for part in segments]
+    if any(part >= 60 for part in parts[1:]):
+        return None
     if len(parts) == 2:
         return parts[0] * 60 + parts[1]
     if len(parts) == 3:
@@ -173,8 +230,11 @@ def _parse_pub_time(value: object) -> str | None:
 
     try:
         timestamp = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     if timestamp <= 0:
         return None
-    return datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+    try:
+        return datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None

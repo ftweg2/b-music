@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import base64
 import json
 import shutil
 import time
@@ -96,25 +97,31 @@ def profile_storage_dir(profile_id: str, settings: Settings | None = None):
 def create_or_get_profile(external_owner_id: str, settings: Settings | None = None) -> dict[str, str]:
     settings = settings or get_settings()
     validate_external_owner_id(external_owner_id)
-    now = utc_now_iso()
-    candidate_profile_id = _new_profile_id()
     with get_connection(settings) as conn:
-        inserted = conn.execute(
-            """
-            INSERT INTO profiles (
-                profile_id, external_owner_id, login_status, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(external_owner_id) DO NOTHING
-            """,
-            (candidate_profile_id, external_owner_id, LoginStatus.UNKNOWN, now, now),
-        )
         profile = conn.execute(
             "SELECT profile_id, external_owner_id FROM profiles WHERE external_owner_id=?",
             (external_owner_id,),
         ).fetchone()
+        status = "exists"
         if profile is None:
-            raise RuntimeError("profile upsert did not return a profile")
-        status = "created" if inserted.rowcount == 1 else "exists"
+            now = utc_now_iso()
+            candidate_profile_id = _new_profile_id()
+            inserted = conn.execute(
+                """
+                INSERT INTO profiles (
+                    profile_id, external_owner_id, login_status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(external_owner_id) DO NOTHING
+                """,
+                (candidate_profile_id, external_owner_id, LoginStatus.UNKNOWN, now, now),
+            )
+            profile = conn.execute(
+                "SELECT profile_id, external_owner_id FROM profiles WHERE external_owner_id=?",
+                (external_owner_id,),
+            ).fetchone()
+            if profile is None:
+                raise RuntimeError("profile upsert did not return a profile")
+            status = "created" if inserted.rowcount == 1 else "exists"
 
     profile_storage_dir(profile["profile_id"], settings).mkdir(parents=True, exist_ok=True)
     return {
@@ -159,6 +166,7 @@ def lock_profile(profile_id: str, job_id: str, settings: Settings | None = None)
             UPDATE profiles
             SET active_job_id=?, updated_at=?
             WHERE profile_id=? AND (active_job_id IS NULL OR active_job_id='')
+              AND NOT EXISTS (SELECT 1 FROM profile_readers WHERE profile_readers.profile_id=profiles.profile_id)
             """,
             (job_id, now, profile_id),
         )
@@ -180,6 +188,99 @@ def release_profile_lock(profile_id: str, job_id: str, settings: Settings | None
         )
 
 
+def acquire_profile_reader(profile_id: str, external_owner_id: str, settings: Settings | None = None) -> str:
+    """Reads may coexist with an audio job, but never with credential mutation."""
+    settings = settings or get_settings()
+    validate_profile_id(profile_id)
+    validate_external_owner_id(external_owner_id)
+    lease_id = f"reader_{uuid.uuid4().hex}"
+    with get_connection(settings) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM profiles WHERE profile_id=?", (profile_id,)).fetchone()
+        if row is None:
+            raise ProfileNotFoundError(profile_id)
+        if row["external_owner_id"] != external_owner_id:
+            raise ProfileOwnershipError("profile does not belong to external_owner_id")
+        active = row["active_job_id"]
+        audio_job = conn.execute(
+            "SELECT job_id FROM jobs WHERE job_id=? AND profile_id=? AND external_owner_id=?",
+            (active, profile_id, external_owner_id),
+        ).fetchone() if active else None
+        if active and audio_job is None:
+            raise ProfileLockedError("login state is being modified; retry shortly")
+        readers = conn.execute("SELECT COUNT(*) AS count FROM profile_readers WHERE profile_id=?", (profile_id,)).fetchone()["count"]
+        if readers >= 4:
+            raise ProfileLockedError("too many concurrent profile reads; retry shortly")
+        conn.execute("INSERT INTO profile_readers (lease_id,profile_id,created_at) VALUES (?,?,?)", (lease_id, profile_id, utc_now_iso()))
+    return lease_id
+
+
+def release_profile_reader(profile_id: str, lease_id: str, settings: Settings | None = None) -> None:
+    with get_connection(settings) as conn:
+        conn.execute("DELETE FROM profile_readers WHERE lease_id=? AND profile_id=?", (lease_id, profile_id))
+
+
+async def logout_profile(
+    profile_id: str,
+    external_owner_id: str,
+    settings: Settings | None = None,
+) -> dict[str, object]:
+    """Clear only this kernel-owned browser profile after all users of it are closed."""
+    settings = settings or get_settings()
+    verify_profile_owner(profile_id, external_owner_id, settings)
+
+    async with _login_runtime_lock():
+        runtimes = [runtime for runtime in _LOGIN_RUNTIMES.values()
+                    if runtime.profile_id == profile_id and runtime.settings.db_path == settings.db_path]
+    tasks = [runtime.task for runtime in runtimes if runtime.task is not None and not runtime.task.done()]
+    for task in tasks:
+        if not task.cancelling():
+            task.cancel()
+    if tasks:
+        _done, pending = await asyncio.wait(tasks, timeout=5)
+        if pending:
+            raise ProfileLockedError("login session is still closing; retry shortly")
+    for runtime in runtimes:
+        # Do not delete browser files while an unsuccessfully closed process might rewrite them.
+        try:
+            async with asyncio.timeout(5):
+                await runtime.managed.close()
+        except Exception as exc:
+            raise ProfileLockedError("browser session could not be closed; retry shortly") from exc
+
+    lock_id = f"logout_{uuid.uuid4().hex[:16]}"
+    lock_profile(profile_id, lock_id, settings)
+    try:
+        _clear_browser_profile(profile_id, settings)
+        update_login_metadata(profile_id, logged_in=False, bili_uid=None, nickname=None, settings=settings)
+        with get_connection(settings) as conn:
+            conn.execute(
+                "UPDATE login_sessions SET status=?,message=?,updated_at=? WHERE profile_id=? AND status=?",
+                (LoginStatus.LOGGED_OUT, "Login cancelled by user", utc_now_iso(), profile_id, LoginStatus.PENDING),
+            )
+        return {"profile_id": profile_id, "logged_in": False, "login_status": LoginStatus.LOGGED_OUT}
+    finally:
+        release_profile_lock(profile_id, lock_id, settings)
+
+
+def _clear_browser_profile(profile_id: str, settings: Settings) -> None:
+    validate_profile_id(profile_id)
+    root = settings.profiles_dir.resolve()
+    target = profile_storage_dir(profile_id, settings)
+    resolved = target.resolve()
+    # Never touch the profiles root, symlink destinations, DB, or artifact storage.
+    if target.is_symlink() or resolved.parent != root or resolved.name != profile_id:
+        raise ValueError("unsafe browser profile path")
+    for protected in (settings.db_path.resolve(), settings.artifacts_dir.resolve()):
+        if protected == resolved or resolved in protected.parents:
+            raise ValueError("browser profile overlaps protected kernel storage")
+    if resolved.exists():
+        if not resolved.is_dir():
+            raise ValueError("browser profile is not a directory")
+        shutil.rmtree(resolved)
+    resolved.mkdir(parents=False, exist_ok=True)
+
+
 async def start_login(
     profile_id: str,
     external_owner_id: str,
@@ -189,6 +290,20 @@ async def start_login(
 
     settings = settings or get_settings()
     verify_profile_owner(profile_id, external_owner_id, settings)
+    async with _login_runtime_lock():
+        for existing in _LOGIN_RUNTIMES.values():
+            if (existing.profile_id == profile_id and existing.settings.db_path == settings.db_path
+                    and existing.expires_at_monotonic > time.monotonic()
+                    and existing.task is not None and not existing.task.done()
+                    and existing.qr_path.is_file()):
+                return {
+                    "login_session_id": existing.login_session_id,
+                    "status": "pending",
+                    "message": "Existing QR login session reused",
+                    "qr_image_url": _qr_image_url(profile_id, existing.login_session_id, external_owner_id),
+                    "qr_image_sha256": _sha256_file(existing.qr_path),
+                    "expires_in_seconds": max(1, int(existing.expires_at_monotonic - time.monotonic())),
+                }
     login_session_id = f"ls_{uuid.uuid4().hex[:16]}"
     lock_id = f"login_{login_session_id}"
     now = utc_now_iso()
@@ -202,50 +317,51 @@ async def start_login(
     managed = None
     runtime = None
     try:
-        with get_connection(settings) as conn:
-            conn.execute(
-                """
-                INSERT INTO login_sessions (
-                    login_session_id, profile_id, status, message, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (login_session_id, profile_id, LoginStatus.PENDING, message, now, now),
+        async with asyncio.timeout(settings.login_preparation_timeout_seconds):
+            with get_connection(settings) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO login_sessions (
+                        login_session_id, profile_id, status, message, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (login_session_id, profile_id, LoginStatus.PENDING, message, now, now),
+                )
+                conn.execute(
+                    "UPDATE profiles SET login_status=?, updated_at=? WHERE profile_id=?",
+                    (LoginStatus.PENDING, now, profile_id),
+                )
+            managed = await BrowserContextManager(settings).open_context(profile_id)
+            page = await managed.new_page()
+            await page.set_viewport_size({"width": 520, "height": 720})
+            await page.goto(
+                settings.bilibili_login_url,
+                wait_until="domcontentloaded",
+                timeout=int(settings.request_timeout_seconds * 1000),
             )
-            conn.execute(
-                "UPDATE profiles SET login_status=?, updated_at=? WHERE profile_id=?",
-                (LoginStatus.PENDING, now, profile_id),
+            await _capture_login_qr(page, qr_path)
+            runtime = LoginRuntime(
+                login_session_id=login_session_id,
+                profile_id=profile_id,
+                lock_id=lock_id,
+                qr_path=qr_path,
+                managed=managed,
+                page=page,
+                settings=settings,
+                expires_at_monotonic=time.monotonic() + settings.login_session_timeout_seconds,
             )
-        managed = await BrowserContextManager(settings).open_context(profile_id)
-        page = await managed.context.new_page()
-        await page.set_viewport_size({"width": 520, "height": 720})
-        await page.goto(
-            settings.bilibili_login_url,
-            wait_until="domcontentloaded",
-            timeout=int(settings.request_timeout_seconds * 1000),
-        )
-        await _capture_login_qr(page, qr_path)
-        runtime = LoginRuntime(
-            login_session_id=login_session_id,
-            profile_id=profile_id,
-            lock_id=lock_id,
-            qr_path=qr_path,
-            managed=managed,
-            page=page,
-            settings=settings,
-            expires_at_monotonic=time.monotonic() + settings.login_session_timeout_seconds,
-        )
-        async with _login_runtime_lock():
-            _LOGIN_RUNTIMES[login_session_id] = runtime
-        runtime.task = asyncio.create_task(_watch_login_session(runtime))
-        qr_sha256 = _sha256_file(qr_path) if qr_path.exists() else None
-        return {
-            "login_session_id": login_session_id,
-            "status": "pending",
-            "message": message,
-            "qr_image_url": _qr_image_url(profile_id, login_session_id, external_owner_id),
-            "qr_image_sha256": qr_sha256,
-            "expires_in_seconds": settings.login_session_timeout_seconds,
-        }
+            async with _login_runtime_lock():
+                _LOGIN_RUNTIMES[login_session_id] = runtime
+            runtime.task = asyncio.create_task(_watch_login_session(runtime))
+            qr_sha256 = _sha256_file(qr_path) if qr_path.exists() else None
+            return {
+                "login_session_id": login_session_id,
+                "status": "pending",
+                "message": message,
+                "qr_image_url": _qr_image_url(profile_id, login_session_id, external_owner_id),
+                "qr_image_sha256": qr_sha256,
+                "expires_in_seconds": settings.login_session_timeout_seconds,
+            }
     except BaseException:
         if runtime is not None:
             async with _login_runtime_lock():
@@ -255,7 +371,8 @@ async def start_login(
                 await asyncio.gather(runtime.task, return_exceptions=True)
         if managed is not None:
             with contextlib.suppress(Exception):
-                await managed.close()
+                async with asyncio.timeout(5):
+                    await managed.close()
         release_profile_lock(profile_id, lock_id, settings)
         _remove_qr_artifacts(profile_id, login_session_id, settings)
         with contextlib.suppress(Exception):
@@ -312,6 +429,7 @@ def get_login_status(profile_id: str, settings: Settings | None = None) -> dict[
     return {
         "profile_id": profile["profile_id"],
         "logged_in": profile.get("login_status") == LoginStatus.LOGGED_IN,
+        "login_status": str(profile.get("login_status") or LoginStatus.UNKNOWN),
         "bili_uid": profile.get("bili_uid"),
         "nickname": profile.get("nickname"),
         "last_verified_at": profile.get("last_verified_at"),
@@ -480,6 +598,28 @@ async def _watch_login_session(runtime: LoginRuntime) -> None:
 
 async def _capture_login_qr(page: Any, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    # qrcode.js already renders a PNG next to its canvas. Reuse those exact
+    # pixels without forcing a costly page rasterization on a small VPS.
+    # Only accept a bounded, decoded square image paired with a QR canvas.
+    with contextlib.suppress(Exception):
+        async with asyncio.timeout(12):
+            handle = await page.wait_for_function("""() => {
+                const canvas = Array.from(document.querySelectorAll('canvas')).some(c => c.width >= 64 && c.width <= 1024 && c.width === c.height);
+                const images = Array.from(document.querySelectorAll('img[src^="data:image/png;base64,"]')).filter(i => i.src.length < 1048576);
+                return canvas && images.length === 1 ? images[0].src : null;
+            }""", timeout=10000, polling=100)
+            try:
+                bitmap = await handle.json_value()
+            finally:
+                await handle.dispose()
+        if isinstance(bitmap, str) and bitmap.startswith("data:image/png;base64,") and len(bitmap) < 1048576:
+            payload = base64.b64decode(bitmap.split(",", 1)[1], validate=True)
+            if payload.startswith(b"\x89PNG\r\n\x1a\n") and len(payload) >= 24:
+                width, height = int.from_bytes(payload[16:20], "big"), int.from_bytes(payload[20:24], "big")
+                if width != height or not 64 <= width <= 1024:
+                    raise ValueError("Unexpected QR bitmap dimensions")
+                path.write_bytes(payload)
+                return
     selectors = [
         ".login-scan-box",
         ".qrcode-box",
@@ -488,10 +628,15 @@ async def _capture_login_qr(page: Any, path: Path) -> None:
         "[class*='qr-code']",
         "canvas",
     ]
+    # One shared wait instead of six sequential 3-second waits on pages whose
+    # QR class differs. Keep the original selector priority and page fallback.
+    with contextlib.suppress(Exception):
+        await page.locator(", ".join(f"{selector}:visible" for selector in selectors)).first.wait_for(state="visible", timeout=3000)
     for selector in selectors:
         with contextlib.suppress(Exception):
             locator = page.locator(selector).first
-            await locator.wait_for(state="visible", timeout=3000)
+            if not await locator.is_visible():
+                continue
             await locator.screenshot(path=str(path))
             if path.exists() and path.stat().st_size > 0:
                 return

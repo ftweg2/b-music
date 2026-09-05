@@ -40,6 +40,7 @@ class LoginStatusResponse(BaseModel):
     bili_uid: str | None = None
     nickname: str | None = None
     last_verified_at: str | None = None
+    login_status: str = "unknown"
 
 
 class CookieImportRequest(BaseModel):
@@ -66,14 +67,15 @@ class JobCreateRequest(BaseModel):
     url: str
     strategy_mode: Literal["auto", "force"] = StrategyMode.AUTO
     strategy: StrategyLiteral | None = None
-    strategy_order: list[StrategyLiteral] | None = None
-    outputs: list[OutputLiteral] = Field(default_factory=lambda: [OutputType.RAW, OutputType.M4A])
+    strategy_order: list[StrategyLiteral] | None = Field(default=None, min_length=1, max_length=3)
+    outputs: list[OutputLiteral] = Field(default_factory=lambda: [OutputType.RAW, OutputType.M4A], min_length=1, max_length=3)
 
 
 class JobCreateResponse(BaseModel):
     job_id: str
     status: str
     stage: str
+    reused: bool = False
 
 
 class StrategyAttemptSummary(BaseModel):
@@ -125,8 +127,9 @@ class VideoSearchRequest(BaseModel):
     external_owner_id: str = Field(min_length=1, max_length=128)
     profile_id: str
     keyword: str = Field(min_length=1, max_length=200)
-    limit: int = Field(default=20, ge=1, le=50)
+    limit: int = Field(default=20, ge=1, le=20)
     page: int = Field(default=1, ge=1, le=10)
+    timeout_seconds: float = Field(default=8.0, ge=1.0, le=30.0)
 
 
 class VideoSearchResult(BaseModel):
@@ -149,6 +152,8 @@ class VideoSearchResponse(BaseModel):
     profile_id: str
     logged_in: bool
     results: list[VideoSearchResult]
+    has_next_page: bool = False
+    total_pages: int | None = None
 
 
 class VideoResolveRequest(BaseModel):

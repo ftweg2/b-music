@@ -6,7 +6,7 @@ import test from "node:test";
 import { closeDatabaseForTests, createPreferredCreator, resetDatabaseForTests } from "../lib/db";
 import { POST } from "../app/api/search/route";
 
-test("API search route returns ranked mock candidates", async () => {
+test("API search route returns unscored mock candidates", async () => {
   process.env.SEARCH_PROVIDER = "mock";
   process.env.DATABASE_PATH = path.join(os.tmpdir(), `bili-music-app-api-${Date.now()}-${Math.random()}.sqlite`);
   closeDatabaseForTests();
@@ -14,7 +14,6 @@ test("API search route returns ranked mock candidates", async () => {
   createPreferredCreator({
     biliMid: "111111",
     name: "Star Sea Music",
-    priorityWeight: 70
   });
   const request = new Request("http://localhost/api/search", {
     method: "POST",

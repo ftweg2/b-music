@@ -39,16 +39,22 @@ export async function proxyTrackMedia(input: {
       return mediaError("TRACK_EXPIRED", "音频缓存已过期，请重新准备", 410);
     }
 
-    const upstream = await fetch(
+    const connectionTimeout = new AbortController();
+    const timer = setTimeout(() => connectionTimeout.abort(), 15000);
+    let upstream: Response;
+    try {
+      upstream = await fetch(
       kernelArtifactUrl(track.kernelJobId, track.artifactName, track.kernelOwnerId),
       {
         method: headOnly ? "HEAD" : "GET",
         cache: "no-store",
         headers: mediaRequestHeaders(request),
-        signal: request.signal
+        signal: AbortSignal.any([request.signal, connectionTimeout.signal])
       }
-    );
+      );
+    } finally { clearTimeout(timer); }
     if (upstream.status === 404) {
+      upstream.body?.cancel().catch(() => undefined);
       updateTrack(track.id, { status: "expired", failureReason: "kernel artifact not found" }, appOwnerId);
       return mediaError("TRACK_EXPIRED", "音频缓存已过期，请重新准备", 410);
     }
@@ -57,6 +63,12 @@ export async function proxyTrackMedia(input: {
       return mediaError("KERNEL_MEDIA_ERROR", `音频服务请求失败：HTTP ${upstream.status}`, 502);
     }
 
+    const contentType = (upstream.headers.get("content-type") || track.artifactMimeType || "").toLowerCase();
+    const multipartRange = upstream.status === 206 && contentType.startsWith("multipart/byteranges;");
+    if ([200, 206].includes(upstream.status) && !contentType.startsWith("audio/") && !contentType.startsWith("application/octet-stream") && !multipartRange) {
+      upstream.body?.cancel().catch(() => undefined);
+      return mediaError("KERNEL_INVALID_MEDIA", "音频服务返回了非音频内容", 502);
+    }
     const headers = mediaResponseHeaders(upstream.headers, track.artifactMimeType);
     headers.set("content-disposition", `${disposition}; ${contentDispositionAttachment(downloadFileName(track)).replace(/^attachment; /, "")}`);
     if (track.artifactSha256) {

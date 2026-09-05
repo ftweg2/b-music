@@ -29,7 +29,7 @@ export class KernelRequestError extends Error {
   readonly status: number | null;
   readonly retryable: boolean;
 
-  constructor(message: string, status: number | null, retryable: boolean) {
+  constructor(message: string, status: number | null, retryable: boolean, public readonly submissionRejected = false, public readonly retryAfterSeconds?: number) {
     super(message);
     this.name = "KernelRequestError";
     this.status = status;
@@ -116,7 +116,9 @@ export async function readKernelJson<T>(path: string, init?: RequestInit): Promi
     throw new KernelRequestError(
       payload.detail || payload.error || `内核请求失败：HTTP ${response.status}`,
       response.status,
-      response.status === 408 || response.status === 429 || response.status >= 500
+      response.status === 408 || response.status === 429 || response.status >= 500 || Number(response.headers.get("retry-after")) > 0,
+      response.headers.get("x-kernel-job-accepted") === "false",
+      Number(response.headers.get("retry-after")) > 0 ? Number(response.headers.get("retry-after")) : undefined
     );
   }
   return payload as T;

@@ -1,0 +1,7 @@
+*
+!Dockerfile.runtime-layer
+!config.py
+!context_manager.py
+!profile_manager.py
+!chrome-headless-shell-linux64/
+!chrome-headless-shell-linux64/**

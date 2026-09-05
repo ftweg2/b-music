@@ -1,233 +1,128 @@
 "use client";
+import { accountFetch } from "@/lib/accountClient";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import { LIBRARY_CHANGE_EVENT, notifyLibraryChange, type LibraryChange } from "@/lib/libraryEvents";
+import { useEffect, useState } from "react";
+import type { ReactNode } from "react";
+import { openPlaylistPicker } from "@/lib/playlistClient";
+import type { CandidateItem } from "@/lib/models";
+import { downloadCandidate, playCandidate } from "./PlayerDock";
+import { PlayIcon, HeartIcon, DownloadIcon, CheckIcon, ExternalLinkIcon, CopyIcon, MusicIcon, UsersIcon, ListMusicIcon } from "./Icons";
 
-import type { CandidateWithScore, InteractionAction } from "@/lib/models";
-import { makeReturnTo } from "@/lib/navigation";
-import { downloadCandidate, playCandidate, prewarmCandidate } from "./PlayerDock";
-
-export function CandidateCard({ candidate }: { candidate: CandidateWithScore }) {
-  const [status, setStatus] = useState<string>("");
+export function CandidateCard({ candidate, index = 0, returnTo, extraActions }: { candidate: CandidateItem; index?: number; returnTo?: string; extraActions?: ReactNode }) {
+  const router = useRouter();
+  const [isFavorited, setIsFavorited] = useState(candidate.isFavorited);
+  const [creatorFollowed, setCreatorFollowed] = useState(candidate.isPreferredCreator);
+  const [busy, setBusy] = useState(false);
+  const [followBusy, setFollowBusy] = useState(false);
   const [imageFailed, setImageFailed] = useState(false);
-  const [returnTo, setReturnTo] = useState("/");
-  const [favorited, setFavorited] = useState(candidate.isFavorited);
-  const showImage = Boolean(candidate.coverUrl) && !imageFailed;
-  const detailHref = useMemo(() => {
-    return `/candidates/${candidate.id}?returnTo=${encodeURIComponent(returnTo)}`;
-  }, [candidate.id, returnTo]);
+  const [feedback, setFeedback] = useState("");
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => { setIsFavorited(candidate.isFavorited); setCreatorFollowed(candidate.isPreferredCreator); setImageFailed(false); }, [candidate.id, candidate.isFavorited, candidate.isPreferredCreator]);
 
   useEffect(() => {
-    setReturnTo(makeReturnTo(window.location.pathname, window.location.search));
-  }, []);
-
-  useEffect(() => {
-    setFavorited(candidate.isFavorited);
-  }, [candidate.isFavorited]);
-
-  async function interact(action: InteractionAction, quiet = false) {
-    if (!quiet) {
-      setStatus("保存中...");
+    function changed(event: Event) {
+      const update = (event as CustomEvent<LibraryChange>).detail;
+      if (update.kind === "favorite" && update.bvid === candidate.bvid) setIsFavorited(update.favorited);
+      if (update.kind === "creator" && update.biliMid === candidate.creatorMid) setCreatorFollowed(update.followed);
     }
-    try {
-      const response = await fetch(`/api/candidates/${candidate.id}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ action })
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(payload.error || "记录失败");
-      }
-      if (!quiet) {
-        setStatus(actionLabel(action));
-      }
-    } catch (error) {
-      if (!quiet) {
-        setStatus(String(error instanceof Error ? error.message : error));
-      }
-    }
-  }
+    window.addEventListener(LIBRARY_CHANGE_EVENT, changed);
+    return () => window.removeEventListener(LIBRARY_CHANGE_EVENT, changed);
+  }, [candidate.bvid, candidate.creatorMid]);
 
   async function toggleFavorite() {
-    setStatus(favorited ? "正在移出收藏..." : "正在加入收藏...");
+    if (busy) return;
+    setBusy(true);
+    setFeedback("");
     try {
-      const response = await fetch(favorited ? `/api/favorites/${candidate.id}` : "/api/favorites", {
-        method: favorited ? "DELETE" : "POST",
-        headers: favorited ? undefined : { "content-type": "application/json" },
-        body: favorited ? undefined : JSON.stringify({ candidateId: candidate.id, bvid: candidate.bvid })
+      const response = await accountFetch(isFavorited ? `/api/favorites/${candidate.id}` : "/api/favorites", {
+        method: isFavorited ? "DELETE" : "POST",
+        signal: AbortSignal.timeout(15000),
+        headers: { "content-type": "application/json" },
+        ...(isFavorited ? {} : { body: JSON.stringify({ candidateId: candidate.id }) }),
       });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(payload.error || "收藏操作失败");
-      }
-      setFavorited(!favorited);
-      setStatus(favorited ? "已移出收藏" : "已收藏到音乐库");
+      if (!response.ok) throw new Error("收藏操作失败，请重试");
+      setIsFavorited(!isFavorited);
+      notifyLibraryChange({ kind: "favorite", candidateId: candidate.id, bvid: candidate.bvid, favorited: !isFavorited });
+      router.refresh();
     } catch (error) {
-      setStatus(String(error instanceof Error ? error.message : error));
-    }
+      setFeedback(error instanceof Error ? error.message : "收藏操作失败");
+    } finally { setBusy(false); }
   }
 
   async function followCreator() {
-    if (!candidate.creatorMid || !candidate.creatorName) {
-      setStatus("这个候选没有可关注的 UP 信息");
-      return;
-    }
-    setStatus("正在关注 UP...");
+    if (followBusy || creatorFollowed) return;
+    setFollowBusy(true);
+    setFeedback("");
     try {
-      const response = await fetch("/api/creators", {
+      const response = await accountFetch("/api/creators", {
         method: "POST",
+        signal: AbortSignal.timeout(15000),
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          biliMid: candidate.creatorMid,
-          name: candidate.creatorName,
-          homepageUrl: `https://space.bilibili.com/${candidate.creatorMid}`,
-          priorityWeight: 70
-        })
+        body: JSON.stringify({ biliMid: candidate.creatorMid, name: candidate.creatorName || undefined }),
       });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(payload.error || "关注 UP 失败");
-      }
-      setStatus("已关注 UP，后续搜索会优先加权");
+      if (!response.ok) throw new Error("关注失败，请重试");
+      setCreatorFollowed(true);
+      notifyLibraryChange({ kind: "creator", biliMid: candidate.creatorMid!, followed: true });
+      router.refresh();
     } catch (error) {
-      setStatus(String(error instanceof Error ? error.message : error));
-    }
+      setFeedback(error instanceof Error ? error.message : "关注失败");
+    } finally { setFollowBusy(false); }
   }
 
-  function queueForPrewarm() {
-    prewarmCandidate(candidate);
-    void interact("queued", true);
-    setStatus("已加入播放队列，后台会尽量提前准备");
+  async function copyLink() {
+    try {
+      await navigator.clipboard.writeText(candidate.sourceUrl);
+      setCopied(true);
+    } catch { setFeedback("无法复制，请从「在 B 站观看」打开原视频"); }
   }
+
+  const cover = candidate.coverUrl?.startsWith("//") ? `https:${candidate.coverUrl}` : candidate.coverUrl;
+  const duration = candidate.durationSeconds ? `${Math.floor(candidate.durationSeconds / 60)}:${String(candidate.durationSeconds % 60).padStart(2, "0")}` : "--:--";
 
   return (
     <article className="candidateCard">
-      <div className="cover">
-        {showImage ? (
-          <img
-            src={imageSrc(candidate.coverUrl)}
-            alt={`${candidate.title} 封面`}
-            loading="lazy"
-            referrerPolicy="no-referrer"
-            onError={() => setImageFailed(true)}
-          />
-        ) : (
-          <CoverFallback bvid={candidate.bvid} title={candidate.title} />
-        )}
+      <span className="trackIndex">{String(index + 1).padStart(2, "0")}</span>
+      <div className="cardCoverWrap">
+        {cover && !imageFailed ? <img src={cover} alt="" className="cardCover" loading="lazy" referrerPolicy="no-referrer" onError={() => setImageFailed(true)} /> : <div className={`cardCover cardCoverFallback coverTone${index % 4}`}><MusicIcon size={38} /><span>B-MUSIC</span></div>}
+        <span className="durationBadge">{duration}</span>
+        <button type="button" className="cardPlayOverlayBtn" onClick={() => playCandidate(candidate)} aria-label={`播放 ${candidate.title}`}><PlayIcon size={20} /></button>
       </div>
-
-      <div>
-        <div className="candidateTop">
-          <div>
-            <h3 className="candidateTitle">{candidate.title}</h3>
-            <p className="meta">
-              UP：{candidate.creatorName || "未知"} {candidate.creatorMid ? `(${candidate.creatorMid})` : ""}
-              {" · "}
-              时长：{formatDuration(candidate.durationSeconds)}
-              {" · "}
-              发布：{formatDate(candidate.pubTime)}
-            </p>
-          </div>
-        </div>
-
-        <div className="row">
-          <button type="button" onClick={() => playCandidate(candidate)}>播放</button>
-          <button
-            type="button"
-            className="secondary"
-            onClick={() => {
-              downloadCandidate(candidate);
-              setStatus("正在准备下载，完成后浏览器会保存音频");
-            }}
-          >
-            下载
-          </button>
-          <button type="button" className={favorited ? "favoriteActive" : "secondary"} onClick={() => void toggleFavorite()}>
-            {favorited ? "已收藏" : "收藏"}
-          </button>
-          <button type="button" className="secondary" onClick={() => void followCreator()} disabled={!candidate.creatorMid}>
-            关注 UP
-          </button>
-          <Link className="buttonLink secondary" href={detailHref} onClick={() => void interact("viewed", true)}>
-            看详情
-          </Link>
-          <button type="button" className="secondary" onClick={() => interact("disliked")}>不喜欢</button>
-          <button type="button" className="secondary" onClick={queueForPrewarm}>加入队列</button>
-          <a className="buttonLink ghost" href={candidate.sourceUrl} target="_blank" rel="noreferrer">
-            打开 B 站
-          </a>
-          <span className="note">{status}</span>
+      <div className="cardBody">
+        <Link href={`/candidates/${candidate.id}${returnTo ? `?returnTo=${encodeURIComponent(returnTo)}` : ""}`} className="cardTitle" title={candidate.title}>{candidate.title}</Link>
+        <div className="cardAuthorRow">
+          <span className="cardAuthorName">{candidate.creatorName || "未知 UP 主"}</span>
+          {creatorFollowed && <span className="authorFollowedBadge">已关注</span>}
         </div>
       </div>
+      <div className="cardFooter">
+        <span className="cardCategory">{candidate.category || "音乐视频"}</span>
+        <div className="cardActionGroup">
+          <button type="button" className={`cardIconAction ${isFavorited ? "isFavorited" : "ghost"}`} onClick={() => void toggleFavorite()} disabled={busy} aria-label={isFavorited ? "取消收藏" : "加入收藏"} aria-pressed={isFavorited} title={isFavorited ? "取消收藏" : "加入收藏"}><HeartIcon size={17} filled={isFavorited} /></button>
+          <details className="cardMore" name="candidate-more" onToggle={(event) => {
+            const details = event.currentTarget;
+            if (!details.open) return;
+            details.dataset.placement = "below";
+            const panel = details.querySelector(".cardMorePanel");
+            const dockTop = document.querySelector(".playerDock")?.getBoundingClientRect().top ?? window.innerHeight;
+            if (panel && panel.getBoundingClientRect().bottom > dockTop - 12 && details.getBoundingClientRect().top > panel.getBoundingClientRect().height + 12) details.dataset.placement = "above";
+          }} onKeyDown={(event) => { if (event.key === "Escape") { event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus(); } }}>
+            <summary aria-label={`更多操作：${candidate.title}`} title="更多操作"><span aria-hidden="true">•••</span></summary>
+            <div className="cardMorePanel">
+              <button type="button" onClick={(event) => { const details = event.currentTarget.closest("details"); if (details) details.open = false; openPlaylistPicker(candidate); }}><ListMusicIcon size={15} />加入歌单</button>
+              <button type="button" onClick={() => downloadCandidate(candidate)}><DownloadIcon size={15} />下载到设备</button>
+              {candidate.creatorMid && (creatorFollowed ? <Link href="/creators"><UsersIcon size={15} />管理关注</Link> : <button type="button" disabled={followBusy} onClick={() => void followCreator()}><UsersIcon size={15} />关注这位 UP 主</button>)}
+              <button type="button" onClick={() => void copyLink()}>{copied ? <CheckIcon size={15} /> : <CopyIcon size={15} />}{copied ? "链接已复制" : "复制视频链接"}</button>
+              <a href={candidate.sourceUrl} target="_blank" rel="noreferrer"><ExternalLinkIcon size={15} />在 B 站观看</a>
+            </div>
+          </details>
+        </div>
+        {extraActions}
+      </div>
+      {feedback && <p className="cardFeedback" role="alert">{feedback}</p>}
     </article>
   );
-}
-
-function imageSrc(value: string | null): string {
-  if (!value) {
-    return "";
-  }
-  if (value.startsWith("/")) {
-    return value;
-  }
-  try {
-    const url = new URL(value.startsWith("//") ? `https:${value}` : value);
-    if (["i0.hdslb.com", "i1.hdslb.com", "i2.hdslb.com"].includes(url.hostname)) {
-      return `/api/image-proxy?url=${encodeURIComponent(url.toString())}`;
-    }
-    return url.toString();
-  } catch {
-    return value;
-  }
-}
-
-function CoverFallback({ bvid, title }: { bvid: string; title: string }) {
-  return (
-    <div className="coverFallback" aria-label={`${title} 封面`}>
-      <div>
-        <div className="coverBars">
-          <span />
-          <span />
-          <span />
-          <span />
-          <span />
-        </div>
-        <strong>{shortTitle(title)}</strong>
-        <small>{bvid}</small>
-      </div>
-    </div>
-  );
-}
-
-function shortTitle(title: string): string {
-  return title.length > 16 ? `${title.slice(0, 16)}...` : title;
-}
-
-function formatDuration(seconds: number | null): string {
-  if (!seconds) {
-    return "未知";
-  }
-  const mins = Math.floor(seconds / 60);
-  const secs = seconds % 60;
-  return `${mins}:${String(secs).padStart(2, "0")}`;
-}
-
-function formatDate(value: string | null): string {
-  if (!value) {
-    return "未知";
-  }
-  return new Date(value).toLocaleDateString("zh-CN");
-}
-
-function actionLabel(action: InteractionAction): string {
-  const labels: Record<InteractionAction, string> = {
-    viewed: "已看过",
-    liked: "已喜欢",
-    disliked: "已标记不喜欢",
-    skipped: "已跳过",
-    queued: "已加入稍后提取",
-    extraction_failed: "已记录提取失败"
-  };
-  return labels[action];
 }

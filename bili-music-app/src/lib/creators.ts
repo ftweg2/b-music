@@ -5,7 +5,7 @@ import {
   updatePreferredCreator
 } from "./db";
 import type { CreatePreferredCreatorInput, PreferredCreator } from "./models";
-import { clampNumber, sanitizeMid, sanitizeNullableText, sanitizeText, sanitizeUrl } from "./sanitize";
+import { sanitizeMid, sanitizeNullableText, sanitizeText } from "./sanitize";
 
 type CreatorProfile = {
   name: string;
@@ -13,34 +13,11 @@ type CreatorProfile = {
 };
 
 export async function listCreators(ownerId = "local"): Promise<PreferredCreator[]> {
-  const creators = listPreferredCreators(ownerId);
-  const resolved: PreferredCreator[] = [];
-  for (const creator of creators) {
-    if (!usesPlaceholderName(creator)) {
-      resolved.push(creator);
-      continue;
-    }
-    const profile = await resolveBilibiliCreatorProfile(creator.biliMid);
-    if (!profile) {
-      resolved.push(creator);
-      continue;
-    }
-    resolved.push(
-      updatePreferredCreator(
-        creator.id,
-        {
-          name: profile.name,
-          homepageUrl: profile.homepageUrl
-        },
-        ownerId
-      ) ?? creator
-    );
-  }
-  return resolved;
+  return listPreferredCreators(ownerId);
 }
 
 export async function addCreator(input: CreatePreferredCreatorInput, ownerId = "local"): Promise<PreferredCreator> {
-  const biliMid = sanitizeMid(input.biliMid) ?? extractMidFromText(input.homepageUrl) ?? extractMidFromText(input.name);
+  const biliMid = sanitizeMid(input.biliMid) ?? extractMidFromText(input.homepageUrl);
   if (!biliMid) {
     throw new Error("请粘贴 UP 主页链接，或输入 UP 主 mid");
   }
@@ -51,20 +28,22 @@ export async function addCreator(input: CreatePreferredCreatorInput, ownerId = "
     externalOwnerId: ownerId,
     biliMid,
     name,
-    homepageUrl: input.homepageUrl ? sanitizeUrl(input.homepageUrl) : profile?.homepageUrl ?? `https://space.bilibili.com/${biliMid}`,
-    priorityWeight: clampNumber(input.priorityWeight, 0, 100, 50),
+    homepageUrl: `https://space.bilibili.com/${biliMid}`,
     notes: sanitizeNullableText(input.notes, 500)
   });
 }
 
 export function editCreator(id: number, input: Partial<CreatePreferredCreatorInput>, ownerId = "local"): PreferredCreator | null {
+  const current = listPreferredCreators(ownerId).find((creator) => creator.id === id);
+  if (!current) return null;
+  if (input.homepageUrl !== undefined && extractMidFromText(input.homepageUrl) !== current.biliMid) {
+    throw new Error("主页必须属于当前 UP；关注其他 UP 请新增关注");
+  }
   return updatePreferredCreator(
     id,
     {
       name: input.name ? sanitizeText(input.name, 200) : undefined,
-      homepageUrl: input.homepageUrl ? sanitizeUrl(input.homepageUrl) : undefined,
-      priorityWeight:
-        input.priorityWeight === undefined ? undefined : clampNumber(input.priorityWeight, 0, 100, 50),
+      homepageUrl: input.homepageUrl === undefined ? undefined : `https://space.bilibili.com/${current.biliMid}`,
       notes: input.notes === undefined ? undefined : sanitizeNullableText(input.notes, 500)
     },
     ownerId
@@ -76,13 +55,12 @@ export function removeCreator(id: number, ownerId = "local"): boolean {
 }
 
 function extractMidFromText(value: unknown): string | null {
-  const text = String(value ?? "").trim();
-  const match = text.match(/(?:space\.bilibili\.com\/)?(\d{1,24})/);
-  return match ? sanitizeMid(match[1]) : null;
-}
-
-function usesPlaceholderName(creator: PreferredCreator): boolean {
-  return creator.name === `UP ${creator.biliMid}` || creator.name === creator.biliMid;
+  try {
+    const url = new URL(String(value || ""));
+    if (url.protocol !== "https:" || url.hostname !== "space.bilibili.com" || url.username || url.password || url.port) return null;
+    const segments = url.pathname.split("/").filter(Boolean);
+    return segments.length === 1 ? sanitizeMid(segments[0]) : null;
+  } catch { return null; }
 }
 
 async function resolveBilibiliCreatorProfile(biliMid: string): Promise<CreatorProfile | null> {

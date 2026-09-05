@@ -88,3 +88,13 @@ wstest*.err
 Thumbs.db
 .vscode/
 .idea/
+
+# Deployment credentials, built images and local validation artifacts
+deploy/private/
+deploy/bundles/
+deploy/data/
+tests/mobile-api/reports/
+tests/performance-reports/
+*.key
+*.pem
+*.tar.gz

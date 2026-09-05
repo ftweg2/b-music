@@ -1,9 +1,12 @@
 import { assertRateLimit } from "../rateLimit";
 import { sanitizeBvid, sanitizeMid, sanitizeNullableText, sanitizeText, sanitizeUrl } from "../sanitize";
 import type { RawSearchResult, SearchOptions, SearchProvider } from "./types";
+import { validTotalPages } from "./pagination";
 
 type BilibiliSearchPayload = {
+  code?: number;
   data?: {
+    numPages?: number;
     result?: Array<Record<string, unknown>>;
   };
   message?: string;
@@ -11,10 +14,14 @@ type BilibiliSearchPayload = {
 
 export const bilibiliProvider: SearchProvider = {
   name: "bilibili",
-  supportsConcurrentSearch: true,
-  async searchVideos(keyword: string, options: SearchOptions): Promise<RawSearchResult[]> {
+  maxPageSize: 20,
+  searchPage: searchBilibiliPage,
+  async searchVideos(keyword, options) { return (await searchBilibiliPage(keyword, options)).results; }
+};
+
+async function searchBilibiliPage(keyword: string, options: SearchOptions) {
     assertRateLimit("bilibili-search", 6, 60_000);
-    const limit = Math.min(options.limit, Number(process.env.BILIBILI_SEARCH_LIMIT || 20), 20);
+    const limit = Math.max(1, Math.min(Math.floor(options.limit), 20));
     const page = Math.max(1, Math.min(Math.round(options.page || 1), 10));
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), options.timeoutMs);
@@ -37,22 +44,27 @@ export const bilibiliProvider: SearchProvider = {
         throw new Error(`Bilibili 搜索源 HTTP ${response.status}`);
       }
       const payload = (await response.json()) as BilibiliSearchPayload;
+      if (payload.code !== undefined && payload.code !== 0) throw new Error(`Bilibili 搜索失败：${sanitizeText(payload.message)}`);
       const results = payload.data?.result;
       if (!Array.isArray(results)) {
         throw new Error(`Bilibili 搜索源没有返回视频结果：${sanitizeText(payload.message)}`);
       }
-      return results.map(normalizeBilibiliResult).filter((item) => item.bvid).slice(0, limit);
+      const items = results.flatMap((item) => {
+        try { const normalized = normalizeBilibiliResult(item); return normalized.bvid ? [normalized] : []; }
+        catch { return []; }
+      }).slice(0, limit);
+      const totalPages = validTotalPages(payload.data?.numPages, results.length);
+      return { results: items, hasNextPage: totalPages !== undefined ? page < totalPages : results.length >= limit, totalPages };
     } catch (error) {
-      throw new Error(`Bilibili 搜索源失败：${sanitizeText(error)}`);
+      throw new Error(`Bilibili 搜索源失败：${sanitizeText(error instanceof Error ? error.message : error)}`);
     } finally {
       clearTimeout(timeout);
     }
-  }
-};
+}
 
 function normalizeBilibiliResult(item: Record<string, unknown>): RawSearchResult {
   const bvid = sanitizeBvid(item.bvid ?? item.arcurl);
-  const creatorMid = sanitizeMid(item.mid ?? item.upic);
+  const creatorMid = sanitizeMid(item.mid);
   return {
     bvid,
     aid: item.aid ? String(item.aid) : null,
@@ -60,7 +72,7 @@ function normalizeBilibiliResult(item: Record<string, unknown>): RawSearchResult
     description: sanitizeNullableText(item.description, 1000),
     creatorMid,
     creatorName: sanitizeNullableText(item.author, 200),
-    coverUrl: sanitizeUrl(String(item.pic ?? "")),
+    coverUrl: sanitizeUrl(String(item.pic ?? "").replace(/^\/\//, "https://")),
     durationSeconds: parseDuration(item.duration),
     pubTime: parsePubTime(item.pubdate),
     sourceUrl: bvid ? `https://www.bilibili.com/video/${bvid}` : sanitizeUrl(String(item.arcurl ?? "")),
@@ -96,5 +108,6 @@ function parsePubTime(value: unknown): string | null {
   if (!Number.isFinite(num) || num <= 0) {
     return null;
   }
-  return new Date(num * 1000).toISOString();
+  const date = new Date(num * 1000);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : null;
 }
