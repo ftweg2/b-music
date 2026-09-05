@@ -28,10 +28,9 @@ RUN playwright install chrome
 
 COPY app ./app
 COPY docs ./docs
-COPY AGENTS.md ./
 
 RUN mkdir -p /data/profiles /data/artifacts
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

@@ -1,10 +1,11 @@
+import { apiEndpoint, apiOptions, ApiError } from "@/lib/api";
 import { NextResponse } from "next/server";
 
 import { getDatabase, markExpiredReadyTracks } from "@/lib/db";
 
 export const runtime = "nodejs";
 
-export function GET() {
+function getHandler() {
   const expiredTracksMarked = markExpiredReadyTracks();
   const db = getDatabase();
   const counts = {
@@ -41,3 +42,6 @@ export function GET() {
     return Number(row?.["COUNT(*)"] ?? 0);
   }
 }
+
+export const GET = apiEndpoint("GET", getHandler);
+export const OPTIONS = apiOptions(["GET"]);

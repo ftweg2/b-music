@@ -1,4 +1,6 @@
 import type { Track } from "./models";
+import type { PlaybackRange } from "./playbackRange";
+import { readPlaybackRange, readPlaybackRanges } from "./playbackRanges";
 
 export type TrackMediaLinks = {
   streamUrl: string | null;
@@ -13,14 +15,27 @@ export type TrackMediaLinks = {
 
 export type TrackApiResource = Omit<Track, "kernelOwnerId"> & {
   media: TrackMediaLinks;
+  playbackRange: PlaybackRange;
 };
 
 export function toTrackApiResource(track: Track): TrackApiResource {
+  return serializeTrack(track,readPlaybackRange(track.bvid,track.externalOwnerId));
+}
+
+export function toTrackApiResources(tracks: Track[]): TrackApiResource[] {
+  const grouped=new Map<string,string[]>();
+  for(const track of tracks){const bvids=grouped.get(track.externalOwnerId)??[];bvids.push(track.bvid);grouped.set(track.externalOwnerId,bvids);}
+  const ranges=new Map([...grouped].map(([owner,bvids])=>[owner,readPlaybackRanges(bvids,owner)]));
+  return tracks.map(track=>serializeTrack(track,ranges.get(track.externalOwnerId)!.get(track.bvid)!));
+}
+
+function serializeTrack(track: Track, playbackRange: PlaybackRange): TrackApiResource {
   const { kernelOwnerId: _kernelOwnerId, ...publicTrack } = track;
   const ready = track.status === "ready" && Boolean(track.kernelJobId && track.artifactName);
   const base = `/api/tracks/${track.id}`;
   return {
     ...publicTrack,
+    playbackRange,
     media: {
       streamUrl: ready ? `${base}/stream` : null,
       downloadUrl: ready ? `${base}/download` : null,

@@ -35,6 +35,7 @@ export type PrepareTrackInput = {
 };
 
 const TERMINAL_FAILED = new Set(["failed", "cancelled"]);
+const syncingTracks = new Map<string, Promise<Track>>();
 
 type ReusableTrackInput = Pick<
   PrepareTrackInput,
@@ -105,7 +106,7 @@ export async function prepareTrack(input: PrepareTrackInput): Promise<Track> {
     });
     return track;
   } catch (error) {
-    const definitiveRejection = error instanceof KernelRequestError && !error.retryable;
+    const definitiveRejection = error instanceof KernelRequestError && (!error.retryable || error.submissionRejected);
     return updateTrack(track.id, {
       status: definitiveRejection ? "failed" : "preparing",
       failureReason: sanitizeText(
@@ -155,9 +156,7 @@ function resolvePlayableCandidate(
   const appOwnerId = sanitizeText(input.appOwnerId || externalOwnerId, 128);
   return (
     getCandidateByBvid(bvid) ||
-    getOrHydrateFavoriteCandidateByBvid(bvid, appOwnerId) ||
-    getOrHydrateFavoriteCandidateByBvid(bvid, externalOwnerId) ||
-    getOrHydrateFavoriteCandidateByBvid(bvid, "local")
+    getOrHydrateFavoriteCandidateByBvid(bvid, appOwnerId)
   );
 }
 
@@ -168,7 +167,12 @@ export async function getSyncedTrack(trackId: number, appOwnerId = "local"): Pro
   }
   const fresh = expireIfNeeded(track);
   if (fresh.status === "preparing" && fresh.kernelJobId) {
-    return syncTrackWithKernel(fresh);
+    const key = `${appOwnerId}:${trackId}`;
+    const running = syncingTracks.get(key);
+    if (running) return running;
+    const pending = syncTrackWithKernel(fresh).finally(() => syncingTracks.delete(key));
+    syncingTracks.set(key, pending);
+    return pending;
   }
   return fresh;
 }

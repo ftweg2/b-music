@@ -13,6 +13,7 @@ from app.profile_manager import (
     get_login_status,
     import_cookies_to_profile,
     start_login,
+    logout_profile,
     verify_profile_owner,
 )
 from app.schemas import (
@@ -28,6 +29,20 @@ from app.security import sanitize_text
 
 
 router = APIRouter(prefix="/v1/profiles", tags=["profiles"])
+
+
+@router.post("/{profile_id}/login/logout", response_model=LoginStatusResponse)
+async def login_logout(profile_id: str, request: LoginStartRequest) -> dict[str, object]:
+    try:
+        return await logout_profile(profile_id, request.external_owner_id)
+    except ProfileLockedError as exc:
+        raise HTTPException(status_code=409, detail="当前登录资料正在使用或关闭中，请稍后重试", headers={"Retry-After": "2"}) from exc
+    except ProfileOwnershipError as exc:
+        raise HTTPException(status_code=403, detail="无权操作这个登录资料") from exc
+    except ProfileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="登录资料不存在") from exc
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail="未能安全清理登录资料，请重试") from exc
 
 
 @router.post("", response_model=ProfileCreateResponse)
@@ -46,7 +61,7 @@ async def login_start(
     try:
         return await start_login(profile_id, request.external_owner_id)
     except ProfileLockedError as exc:
-        raise HTTPException(status_code=409, detail=sanitize_text(exc)) from exc
+        raise HTTPException(status_code=409, detail=sanitize_text(exc), headers={"Retry-After": "2"}) from exc
     except ProfileOwnershipError as exc:
         raise HTTPException(status_code=403, detail=sanitize_text(exc)) from exc
     except ProfileNotFoundError as exc:

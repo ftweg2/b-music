@@ -1,41 +1,43 @@
-import { cookies } from "next/headers";
 import type { NextResponse } from "next/server";
 
 import { sanitizeText } from "./sanitize";
+import { accountLibraryEnabled, appOwnerIdFromBiliUid, localAppOwnerId } from "./ownerIdentity";
+import { getDefaultKernelLoginStatus } from "./kernelSession";
+import { migrateLegacyLibrary } from "./accountLibrary";
+import { activeAccountRequest } from "./accountRequest";
+import { ApiError } from "./api";
+export { appOwnerIdFromBiliUid } from "./ownerIdentity";
 
 export const APP_OWNER_COOKIE = "bili_music_owner_id";
 export const APP_OWNER_NAME_COOKIE = "bili_music_owner_name";
 
 const LOCAL_OWNER_ID = "local";
 
-export async function currentAppOwnerId(): Promise<string> {
-  if (process.env.APP_SINGLE_USER_MODE !== "0") {
-    return normalizeSingleOwnerId(process.env.APP_OWNER_ID || process.env.KERNEL_EXTERNAL_OWNER_ID || LOCAL_OWNER_ID);
-  }
-  try {
-    const store = await cookies();
-    return normalizeAppOwnerId(store.get(APP_OWNER_COOKIE)?.value);
-  } catch {
-    return LOCAL_OWNER_ID;
-  }
+export async function assertAccountContext(): Promise<void> {
+  const expected=activeAccountRequest()?.expectedContext;
+  if(!expected)return;
+  const status=await getDefaultKernelLoginStatus();
+  if(expected!==status.sessionKey)throw new ApiError(409,"ACCOUNT_CHANGED","账号已变化，请刷新后重试");
 }
 
-export function appOwnerIdFromBiliUid(biliUid: unknown): string {
-  const uid = sanitizeText(biliUid, 64).replace(/[^\d]/g, "");
-  return uid ? `bili:${uid}` : LOCAL_OWNER_ID;
+export async function currentAppOwnerId(): Promise<string> {
+  if (!accountLibraryEnabled()) return localAppOwnerId();
+  try {
+    const status = await getDefaultKernelLoginStatus();
+    const expected = activeAccountRequest()?.expectedContext;
+    if (expected && expected !== status.sessionKey) throw new ApiError(409, "ACCOUNT_CHANGED", "账号已变化，请刷新后重试");
+    if (status.loggedIn) migrateLegacyLibrary(localAppOwnerId(), status.appOwnerId);
+    return status.appOwnerId;
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    // Never reinterpret an unavailable identity service as another account or guest.
+    throw new ApiError(503, "ACCOUNT_UNAVAILABLE", "暂时无法确认 Bilibili 账号，请稍后重试", true);
+  }
 }
 
 export function normalizeAppOwnerId(value: unknown): string {
   const text = sanitizeText(value, 128);
   if (/^bili:\d{1,24}$/.test(text)) {
-    return text;
-  }
-  return LOCAL_OWNER_ID;
-}
-
-function normalizeSingleOwnerId(value: unknown): string {
-  const text = sanitizeText(value, 128);
-  if (/^[A-Za-z0-9_.:@-]{1,128}$/.test(text)) {
     return text;
   }
   return LOCAL_OWNER_ID;

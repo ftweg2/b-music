@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import shutil
 import threading
-from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -38,7 +38,10 @@ from .strategies.api_dash import ApiDashStrategy
 from .strategies.base import ExtractionStrategy, StrategyCancelled, StrategyContext, StrategyResult
 from .strategies.browser_network import BrowserNetworkStrategy
 from .strategies.mse_sourcebuffer import MseSourceBufferStrategy
-from .strategy_selector import StrategyMetricSnapshot, select_strategy_order
+from .strategy_selector import select_strategy_order
+
+
+logger = logging.getLogger(__name__)
 
 
 class JobNotFoundError(LookupError):
@@ -71,7 +74,7 @@ def job_dir(job_id: str, settings: Settings | None = None) -> Path:
     return settings.artifacts_dir / job_id
 
 
-def create_job(request: object, settings: Settings | None = None) -> dict[str, str]:
+def create_job(request: object, settings: Settings | None = None) -> dict[str, object]:
     settings = settings or get_settings()
     validate_job_id(request.job_id)
     validate_external_owner_id(request.external_owner_id)
@@ -80,15 +83,29 @@ def create_job(request: object, settings: Settings | None = None) -> dict[str, s
     canonical_url = f"https://www.bilibili.com/video/{bvid}"
     if request.strategy_mode == "force" and not request.strategy:
         raise ValueError("force mode requires strategy")
+    select_strategy_order(request.strategy_mode, request.strategy, request.strategy_order)
     now = utc_now_iso()
     outputs = list(dict.fromkeys(request.outputs))
+    if not outputs:
+        raise ValueError("outputs must not be empty")
     settings.artifacts_dir.mkdir(parents=True, exist_ok=True)
     target_dir = job_dir(request.job_id, settings)
     with get_connection(settings) as conn:
         conn.execute("BEGIN IMMEDIATE")
-        duplicate = conn.execute("SELECT job_id FROM jobs WHERE job_id=?", (request.job_id,)).fetchone()
+        duplicate = conn.execute("SELECT * FROM jobs WHERE job_id=?", (request.job_id,)).fetchone()
         if duplicate:
-            raise JobConflictError("job_id already exists")
+            if duplicate["external_owner_id"] != request.external_owner_id:
+                raise ProfileOwnershipError("job does not belong to external_owner_id")
+            equivalent = (
+                duplicate["profile_id"] == request.profile_id and duplicate["url"] == canonical_url
+                and duplicate["strategy_mode"] == request.strategy_mode
+                and duplicate["strategy"] == request.strategy
+                and json.loads(duplicate["strategy_order_json"] or "null") == request.strategy_order
+                and set(json.loads(duplicate["outputs_json"])) == set(outputs)
+            )
+            if not equivalent:
+                raise JobConflictError("job_id already exists with different parameters")
+            return {"job_id": request.job_id, "status": duplicate["status"], "stage": duplicate["stage"], "reused": True}
 
         profile = conn.execute(
             "SELECT * FROM profiles WHERE profile_id=?",
@@ -142,7 +159,7 @@ def create_job(request: object, settings: Settings | None = None) -> dict[str, s
         _rollback_created_job(request.job_id, request.profile_id, settings)
         raise
 
-    return {"job_id": request.job_id, "status": JobState.QUEUED, "stage": JobState.QUEUED}
+    return {"job_id": request.job_id, "status": JobState.QUEUED, "stage": JobState.QUEUED, "reused": False}
 
 
 def _rollback_created_job(job_id_value: str, profile_id: str, settings: Settings) -> None:
@@ -157,112 +174,157 @@ def _rollback_created_job(job_id_value: str, profile_id: str, settings: Settings
         )
 
 
+def _claim_job_execution(job_id_value: str, settings: Settings) -> bool:
+    validate_job_id(job_id_value)
+    now = utc_now_iso()
+    with get_connection(settings) as conn:
+        claim = conn.execute(
+            """UPDATE jobs SET status=?,stage=?,started_at=?,updated_at=?
+               WHERE job_id=? AND status=? AND started_at IS NULL""",
+            (JobState.VALIDATING_PROFILE, JobState.VALIDATING_PROFILE, now, now, job_id_value, JobState.QUEUED),
+        )
+        return claim.rowcount == 1
+
+
+def _consume_media_task(task: asyncio.Task) -> None:
+    if not task.cancelled():
+        task.exception()
+
+
+async def _settle_media_worker(task: asyncio.Task | None, local_cancel: threading.Event) -> None:
+    local_cancel.set()
+    if task is None:
+        return
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=10)
+    except Exception:
+        # Cooperative ffmpeg cancellation normally exits within 0.25s (+ process termination).
+        # A straggler cannot publish a successful job after its caller has terminated.
+        pass
+
+
+def _finish_failed(job_id_value: str, reason: str, settings: Settings, strategy: str | None = None) -> None:
+    _update_job_state(job_id_value, JobState.FAILED, settings, strategy, reason)
+    try:
+        _write_failure_artifacts(job_id_value, reason, settings)
+    except Exception as exc:
+        logger.warning("Could not write failure report for %s: %s", job_id_value, sanitize_text(exc))
+
+
 async def run_job(job_id_value: str, settings: Settings | None = None) -> None:
     settings = settings or get_settings()
+    if not _claim_job_execution(job_id_value, settings):
+        return
+    media_task: asyncio.Task[list[ArtifactRecord]] | None = None
     selected_strategy: str | None = None
     profile_id: str | None = None
     local_cancel = threading.Event()
     try:
-        job = _get_job_row(job_id_value, settings)
-        profile_id = str(job["profile_id"])
-        _update_job_state(job_id_value, JobState.VALIDATING_PROFILE, settings)
-        profile = _get_profile_for_job(job, settings)
-        if _cancel_requested(job_id_value, settings):
-            _mark_cancelled(job_id_value, settings)
-            return
-
-        _update_job_state(job_id_value, JobState.PREPARING_CONTEXT, settings)
-        registry = strategy_registry()
-        metrics = _load_strategy_metrics(settings)
-        order = select_strategy_order(
-            strategy_mode=str(job["strategy_mode"]),
-            requested_strategy=job["strategy"],
-            strategy_order=json.loads(job["strategy_order_json"] or "null"),
-            available_strategies=list(registry.keys()),
-            metrics=metrics,
-            logged_in=is_profile_logged_in(profile),
-            context_hints={},
-        )
-        context = StrategyContext(
-            job_id=job_id_value,
-            external_owner_id=str(job["external_owner_id"]),
-            profile_id=profile_id,
-            url=str(job["url"]),
-            outputs=json.loads(job["outputs_json"]),
-            job_dir=job_dir(job_id_value, settings),
-            settings=settings,
-            logged_in=is_profile_logged_in(profile),
-            context_hints={},
-            cancel_requested=lambda: (
-                local_cancel.is_set() or _cancel_requested(job_id_value, settings)
-            ),
-        )
-
-        last_result: StrategyResult | None = None
-        for strategy_name in order:
+        async with asyncio.timeout(settings.job_timeout_seconds):
+            job = _get_job_row(job_id_value, settings)
+            profile_id = str(job["profile_id"])
+            profile = _get_profile_for_job(job, settings)
             if _cancel_requested(job_id_value, settings):
                 _mark_cancelled(job_id_value, settings)
                 return
-            strategy = registry[strategy_name]
-            _update_job_state(job_id_value, _stage_for_strategy(strategy_name), settings)
-            if not strategy.supports(context):
-                result = StrategyResult.failed(
-                    failure_code="UNSUPPORTED_CONTEXT",
-                    reason="Strategy does not support this job context",
-                )
-            else:
-                result = await strategy.run(context)
-            last_result = result
-            duration_ms = int(result.timings.get("duration_ms") or 0)
-            _record_attempt(job_id_value, strategy_name, result, duration_ms, settings)
-            _write_strategy_report(job_id_value, settings)
 
-            if result.status == StrategyStatus.SUCCEEDED:
+            _update_job_state(job_id_value, JobState.PREPARING_CONTEXT, settings)
+            registry = strategy_registry()
+            order = select_strategy_order(
+                strategy_mode=str(job["strategy_mode"]),
+                requested_strategy=job["strategy"],
+                strategy_order=json.loads(job["strategy_order_json"] or "null"),
+                available_strategies=list(registry.keys()),
+                logged_in=is_profile_logged_in(profile),
+                context_hints={},
+            )
+            context = StrategyContext(
+                job_id=job_id_value,
+                external_owner_id=str(job["external_owner_id"]),
+                profile_id=profile_id,
+                url=str(job["url"]),
+                outputs=json.loads(job["outputs_json"]),
+                job_dir=job_dir(job_id_value, settings),
+                settings=settings,
+                logged_in=is_profile_logged_in(profile),
+                context_hints={},
+                cancel_requested=lambda: (
+                    local_cancel.is_set() or _cancel_requested(job_id_value, settings)
+                ),
+            )
+
+            last_result: StrategyResult | None = None
+            for strategy_name in order:
                 if _cancel_requested(job_id_value, settings):
                     _mark_cancelled(job_id_value, settings)
                     return
-                selected_strategy = strategy_name
-                _update_job_state(job_id_value, JobState.PROCESSING_MEDIA, settings, selected_strategy)
-                artifacts = await asyncio.to_thread(
-                    _process_successful_result,
-                    context,
-                    result,
-                    strategy_name,
-                    settings,
-                )
-                if _cancel_requested(job_id_value, settings):
-                    _mark_cancelled(job_id_value, settings)
+                strategy = registry[strategy_name]
+                _update_job_state(job_id_value, _stage_for_strategy(strategy_name), settings)
+                if not strategy.supports(context):
+                    result = StrategyResult.failed(
+                        failure_code="UNSUPPORTED_CONTEXT",
+                        reason="Strategy does not support this job context",
+                    )
+                else:
+                    try:
+                        result = await strategy.run(context)
+                    except StrategyCancelled:
+                        raise
+                    except Exception as exc:
+                        result = StrategyResult.failed(failure_code="STRATEGY_EXCEPTION", reason=sanitize_text(exc))
+                last_result = result
+                duration_ms = int(result.timings.get("duration_ms") or 0)
+                _record_attempt(job_id_value, strategy_name, result, duration_ms, settings)
+                _write_strategy_report(job_id_value, settings)
+
+                if result.status == StrategyStatus.SUCCEEDED:
+                    if _cancel_requested(job_id_value, settings):
+                        _mark_cancelled(job_id_value, settings)
+                        return
+                    selected_strategy = strategy_name
+                    _update_job_state(job_id_value, JobState.PROCESSING_MEDIA, settings, selected_strategy)
+                    media_task = asyncio.create_task(asyncio.to_thread(
+                        _process_successful_result,
+                        context,
+                        result,
+                        strategy_name,
+                        settings,
+                    ))
+                    media_task.add_done_callback(_consume_media_task)
+                    artifacts = await asyncio.shield(media_task)
+                    if _cancel_requested(job_id_value, settings):
+                        _mark_cancelled(job_id_value, settings)
+                        return
+                    _save_artifacts(job_id_value, context.job_dir, artifacts, settings)
+                    _update_job_state(job_id_value, JobState.SUCCEEDED, settings, selected_strategy)
                     return
-                _save_artifacts(job_id_value, context.job_dir, artifacts, settings)
-                _update_job_state(job_id_value, JobState.SUCCEEDED, settings, selected_strategy)
+
+            if _cancel_requested(job_id_value, settings):
+                _mark_cancelled(job_id_value, settings)
                 return
-
-        if _cancel_requested(job_id_value, settings):
-            _mark_cancelled(job_id_value, settings)
-            return
-        failure_reason = "All strategies failed"
-        if last_result:
-            failure_reason = last_result.reason
-        _write_failure_artifacts(job_id_value, failure_reason, settings)
-        _update_job_state(job_id_value, JobState.FAILED, settings, selected_strategy, failure_reason)
+            failure_reason = "All strategies failed"
+            if last_result:
+                failure_reason = last_result.reason
+            _finish_failed(job_id_value, failure_reason, settings, selected_strategy)
+    except TimeoutError:
+        await _settle_media_worker(media_task, local_cancel)
+        _finish_failed(job_id_value, "Job exceeded its total time limit", settings, selected_strategy)
     except StrategyCancelled:
+        await _settle_media_worker(media_task, local_cancel)
         _mark_cancelled(job_id_value, settings)
     except asyncio.CancelledError:
-        local_cancel.set()
+        await _settle_media_worker(media_task, local_cancel)
         _mark_cancelled(job_id_value, settings)
         raise
     except RequestedOutputError as exc:
-        _save_artifacts(job_id_value, job_dir(job_id_value, settings), exc.artifacts, settings)
-        _update_job_state(
-            job_id_value,
-            JobState.FAILED,
-            settings,
-            selected_strategy,
-            sanitize_text(exc),
-        )
-    except Exception as exc:
-        _write_failure_artifacts(job_id_value, sanitize_text(exc), settings)
         _update_job_state(job_id_value, JobState.FAILED, settings, selected_strategy, sanitize_text(exc))
+        try:
+            _save_artifacts(job_id_value, job_dir(job_id_value, settings), exc.artifacts, settings)
+        except Exception as save_error:
+            logger.warning("Failed to save partial job artifacts: %s", sanitize_text(save_error))
+    except Exception as exc:
+        await _settle_media_worker(media_task, local_cancel)
+        _finish_failed(job_id_value, sanitize_text(exc), settings, selected_strategy)
     finally:
         if profile_id:
             release_profile_lock(profile_id, job_id_value, settings)
@@ -310,6 +372,7 @@ def recover_interrupted_runtime(settings: Settings | None = None) -> dict[str, i
     settings = settings or get_settings()
     now = utc_now_iso()
     with get_connection(settings) as conn:
+        conn.execute("DELETE FROM profile_readers")
         interrupted = conn.execute(
             """
             SELECT job_id FROM jobs
@@ -349,11 +412,14 @@ def recover_interrupted_runtime(settings: Settings | None = None) -> dict[str, i
     # Recovery is a terminal transition too: consumers must see the same
     # failure artifacts as they would for an in-process failure.
     for job_id_value in job_ids:
-        _write_failure_artifacts(
-            job_id_value,
-            "kernel restarted before this job reached a terminal state",
-            settings,
-        )
+        try:
+            _write_failure_artifacts(
+                job_id_value,
+                "kernel restarted before this job reached a terminal state",
+                settings,
+            )
+        except Exception as exc:
+            logger.warning("Could not write recovered-job report: %s", sanitize_text(exc))
     return {"jobs_marked_failed": len(job_ids), "profile_locks_released": len(locks)}
 
 
@@ -594,8 +660,11 @@ def _cancel_requested(job_id_value: str, settings: Settings) -> bool:
 
 
 def _mark_cancelled(job_id_value: str, settings: Settings) -> None:
-    _write_failure_artifacts(job_id_value, "Job cancelled", settings)
     _update_job_state(job_id_value, JobState.CANCELLED, settings, error="Job cancelled")
+    try:
+        _write_failure_artifacts(job_id_value, "Job cancelled", settings)
+    except Exception as exc:
+        logger.warning("Could not write cancellation report: %s", sanitize_text(exc))
 
 
 def _record_attempt(
@@ -686,21 +755,6 @@ def _list_attempts(job_id_value: str, settings: Settings) -> list[dict[str, obje
         item["sanitized_debug_info"] = json.loads(item.pop("sanitized_debug_info_json") or "{}")
         attempts.append(item)
     return attempts
-
-
-def _load_strategy_metrics(settings: Settings) -> dict[str, StrategyMetricSnapshot]:
-    rows = strategy_metrics(settings)
-    return {
-        row["strategy_name"]: StrategyMetricSnapshot(
-            strategy_name=row["strategy_name"],
-            total_attempts=int(row["total_attempts"]),
-            success_count=int(row["success_count"]),
-            fail_count=int(row["fail_count"]),
-            last_failure_reason=row["last_failure_reason"],
-            avg_duration_ms=float(row["avg_duration_ms"]),
-        )
-        for row in rows
-    }
 
 
 def _write_strategy_report(job_id_value: str, settings: Settings) -> ArtifactRecord:

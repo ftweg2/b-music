@@ -1,8 +1,6 @@
 # Cookie Import
 
-Cookie import is allowed only when the local user voluntarily provides their own Bilibili Cookie or an authorized CTF account Cookie.
 
-The import target is always one kernel-owned `profile_id`. Imported session state is used only inside that profile.
 
 ## Supported Formats
 

@@ -1,13 +1,23 @@
 import { SearchBox } from "@/components/SearchBox";
+import { CompassIcon } from "@/components/Icons";
 
-export default function SearchPage() {
+export default async function SearchPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
+  const query = await searchParams;
+  const params = new URLSearchParams();
+  for (const key of ["q", "remote", "provider", "limit", "page", "run", "searchId", "sessionKey"]) if (typeof query[key] === "string") params.set(key, query[key]);
   return (
     <>
       <header className="pageHeader">
-        <h2>发现音乐</h2>
-        <p>只搜索和保存候选视频 metadata，不下载音频，不缓存页面。</p>
+        <div className="pageTitleRow">
+          <div className="pageIcon lime">
+            <CompassIcon size={20} />
+          </div>
+          <span className="sectionKicker">FIND YOUR SOUND</span>
+        </div>
+        <h1>搜索音乐</h1>
+        <p>一首惦记的歌，一位喜欢的歌手。找到你想听的那个版本。</p>
       </header>
-      <SearchBox />
+      <SearchBox initialQuery={params.toString()} />
     </>
   );
 }

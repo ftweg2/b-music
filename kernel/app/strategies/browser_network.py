@@ -44,7 +44,7 @@ class BrowserNetworkStrategy:
         try:
             video_url = normalize_video_url(context.url)
             managed = await manager.open_context(context.profile_id)
-            page = await managed.context.new_page()
+            page = await managed.new_page()
             capture = NetworkCapture()
             capture.attach(page)
 

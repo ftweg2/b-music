@@ -1,4 +1,5 @@
 ﻿import assert from "node:assert/strict";
+import "./testEnvironment";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -18,16 +19,12 @@ import {
   resetDatabaseForTests,
   upsertCandidateVideo
 } from "../lib/db";
-import { musicLikelihood } from "../lib/search/musicHeuristics";
-import { rankCandidate, sortByRank } from "../lib/search/ranker";
-import type { PreferredCreator } from "../lib/models";
-import type { NormalizedCandidate, SearchProvider } from "../lib/search/types";
+import type { SearchProvider } from "../lib/search/types";
 import { normalizeRawSearchResult, runSearch } from "../lib/search/cache";
 import { mockProvider } from "../lib/search/mockProvider";
 import { POST as searchPost } from "../app/api/search/route";
 import { makeReturnTo, safeInternalReturnTo } from "../lib/navigation";
 import { nextIndexOnEnded, nextIndexOnManual, nextPlaybackMode, playbackModeLabel } from "../lib/playback";
-import { buildRecommendationReasons } from "../lib/recommendationReasons";
 import { selectPlayableArtifact } from "../lib/tracks";
 import { assertRateLimit, RateLimitError, resetRateLimitsForTests } from "../lib/rateLimit";
 import {
@@ -42,95 +39,7 @@ type TestCase = {
   run: () => void | Promise<void>;
 };
 
-const creator: PreferredCreator = {
-  id: 1,
-  externalOwnerId: "local",
-  biliMid: "111111",
-  name: "Star Sea Music",
-  homepageUrl: null,
-  priorityWeight: 70,
-  notes: null,
-  createdAt: new Date().toISOString(),
-  updatedAt: new Date().toISOString()
-};
-
-const preferred: NormalizedCandidate = {
-  bvid: "BV1mock0001A",
-  aid: null,
-  title: "Night Flight Star original song MV",
-  description: "music",
-  creatorMid: "111111",
-  creatorName: "Star Sea Music",
-  coverUrl: null,
-  durationSeconds: 260,
-  pubTime: new Date().toISOString(),
-  sourceUrl: "https://www.bilibili.com/video/BV1mock0001A",
-  category: "music",
-  tags: ["original"],
-  searchKeyword: "night",
-  sourceProvider: "mock"
-};
-
 const tests: TestCase[] = [
-  {
-    name: "music heuristic boosts music-like titles and duration",
-    run: () => {
-      const score = musicLikelihood({
-        title: "Night Flight Star original song MV",
-        category: "music",
-        durationSeconds: 260,
-        tags: ["original", "MV"]
-      });
-      assert.equal(score > 30, true);
-    }
-  },
-  {
-    name: "music heuristic penalizes reaction/tutorial content",
-    run: () => {
-      const score = musicLikelihood({
-        title: "Night Flight Star reaction analysis",
-        category: "commentary",
-        durationSeconds: 3600,
-        tags: ["reaction", "analysis"]
-      });
-      assert.equal(score < 0, true);
-    }
-  },
-  {
-    name: "preferred creator boost is strong",
-    run: () => {
-      const score = rankCandidate(preferred, "night", [creator]);
-      assert.equal(score.preferredCreator, 70);
-    }
-  },
-  {
-    name: "ranking orders preferred creator first",
-    run: () => {
-      const other = { ...preferred, bvid: "BV1mock0002B", creatorMid: "222222", creatorName: "Other" };
-      const ranked = sortByRank([other, preferred], "night", [creator]);
-      assert.equal(ranked[0].candidate.creatorMid, "111111");
-    }
-  },
-  {
-    name: "favorite interaction boosts ranking",
-    run: () => {
-      const score = rankCandidate(preferred, "night", [], { favorite: 1 });
-      assert.equal(score.interaction >= 28, true);
-    }
-  },
-  {
-    name: "recommendation reasons hide raw score math from cards",
-    run: () => {
-      const score = rankCandidate(preferred, "night", [creator]);
-      const reasons = buildRecommendationReasons({
-        durationSeconds: preferred.durationSeconds,
-        scoreBreakdown: score,
-        isPreferredCreator: true
-      });
-      assert.equal(reasons.includes("关注 UP 优先"), true);
-      assert.equal(reasons.includes("标题强相关"), true);
-    }
-  },
   {
     name: "mock provider returns deterministic data",
     run: async () => {
@@ -171,7 +80,7 @@ const tests: TestCase[] = [
     name: "candidate metadata upsert updates by bvid",
     run: () => {
       useTempDatabase("db");
-      createPreferredCreator({ biliMid: "111111", name: "Star Sea Music", priorityWeight: 70 });
+      createPreferredCreator({ biliMid: "111111", name: "Star Sea Music" });
       const first = upsertCandidateVideo({
         bvid: "BV1mock0001A",
         aid: null,
@@ -187,10 +96,6 @@ const tests: TestCase[] = [
         tagsJson: "[]",
         searchKeyword: "night",
         sourceProvider: "mock",
-        musicLikelihoodScore: 1,
-        preferredCreatorBoost: 70,
-        finalScore: 80,
-        scoreBreakdownJson: "{}"
       });
       const second = upsertCandidateVideo({ ...first, title: "new title" });
       assert.equal(first.id, second.id);
@@ -217,10 +122,6 @@ const tests: TestCase[] = [
         tagsJson: "[]",
         searchKeyword: "favorite",
         sourceProvider: "test",
-        musicLikelihoodScore: 10,
-        preferredCreatorBoost: 0,
-        finalScore: 20,
-        scoreBreakdownJson: "{}"
       });
       const favorite = createFavoriteVideo(candidate.id, { note: "keep" });
       assert.equal(favorite.candidateId, candidate.id);
@@ -248,10 +149,6 @@ const tests: TestCase[] = [
         tagsJson: "[]",
         searchKeyword: "favorite",
         sourceProvider: "test",
-        musicLikelihoodScore: 10,
-        preferredCreatorBoost: 0,
-        finalScore: 20,
-        scoreBreakdownJson: "{}"
       });
       const favorite = createFavoriteVideo(candidate.id, { note: "keep" });
       getDatabase().prepare("UPDATE favorite_videos SET candidate_id=NULL WHERE id=?").run(favorite.id);
@@ -281,10 +178,6 @@ const tests: TestCase[] = [
         tagsJson: "[]",
         searchKeyword: "favorite",
         sourceProvider: "test",
-        musicLikelihoodScore: 10,
-        preferredCreatorBoost: 0,
-        finalScore: 20,
-        scoreBreakdownJson: "{}"
       });
       createFavoriteVideo(candidate.id, { note: "keep" });
       getDatabase().prepare("DELETE FROM candidate_videos WHERE id=?").run(candidate.id);
@@ -298,11 +191,11 @@ const tests: TestCase[] = [
     }
   },
   {
-    name: "API search route returns ranked mock candidates",
+    name: "API search route returns unscored mock candidates",
     run: async () => {
       process.env.SEARCH_PROVIDER = "mock";
       useTempDatabase("api");
-      createPreferredCreator({ biliMid: "111111", name: "Star Sea Music", priorityWeight: 70 });
+      createPreferredCreator({ biliMid: "111111", name: "Star Sea Music" });
       const request = new Request("http://localhost/api/search", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -317,11 +210,11 @@ const tests: TestCase[] = [
     }
   },
   {
-    name: "remote search starts primary and followed creator requests concurrently",
+    name: "remote search performs one request without creator expansion",
     run: async () => {
       useTempDatabase("search-concurrency");
-      createPreferredCreator({ biliMid: "111111", name: "Creator One", priorityWeight: 70 });
-      createPreferredCreator({ biliMid: "222222", name: "Creator Two", priorityWeight: 60 });
+      createPreferredCreator({ biliMid: "111111", name: "Creator One" });
+      createPreferredCreator({ biliMid: "222222", name: "Creator Two" });
 
       const started: string[] = [];
       let releaseSearches: () => void = () => undefined;
@@ -347,7 +240,7 @@ const tests: TestCase[] = [
       });
       await Promise.resolve();
 
-      assert.deepEqual(new Set(started), new Set(["night", "night Creator One", "night Creator Two"]));
+      assert.deepEqual(new Set(started), new Set(["night"]));
       releaseSearches();
       await pending;
       closeDatabaseForTests();
@@ -388,10 +281,6 @@ const tests: TestCase[] = [
         tagsJson: "[]",
         searchKeyword: "flower",
         sourceProvider: "test",
-        musicLikelihoodScore: 20,
-        preferredCreatorBoost: 0,
-        finalScore: 30,
-        scoreBreakdownJson: "{}"
       });
       const track = createOrReuseTrack(candidate);
       assert.equal(track.candidateId, candidate.id);
@@ -421,10 +310,6 @@ const tests: TestCase[] = [
         tagsJson: "[]",
         searchKeyword: "owner",
         sourceProvider: "test",
-        musicLikelihoodScore: 20,
-        preferredCreatorBoost: 0,
-        finalScore: 30,
-        scoreBreakdownJson: "{}"
       });
 
       const ownerOneTrack = createOrReuseTrack(candidate, "bili:1001");
@@ -458,10 +343,6 @@ const tests: TestCase[] = [
         tagsJson: "[]",
         searchKeyword: "claim",
         sourceProvider: "test",
-        musicLikelihoodScore: 20,
-        preferredCreatorBoost: 0,
-        finalScore: 20,
-        scoreBreakdownJson: "{}"
       });
       const track = createOrReuseTrack(candidate, "local");
       const claimed = claimTrackPreparation(track.id, "job-one", "local", "kernel-owner");
@@ -491,10 +372,6 @@ const tests: TestCase[] = [
         tagsJson: "[]",
         searchKeyword: "legacy",
         sourceProvider: "test",
-        musicLikelihoodScore: 10,
-        preferredCreatorBoost: 0,
-        finalScore: 20,
-        scoreBreakdownJson: "{}"
       });
       const track = createOrReuseTrack(candidate);
       getDatabase()

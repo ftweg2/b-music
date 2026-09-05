@@ -97,6 +97,26 @@ def test_artifact_download_supports_head_range_and_checksum(tmp_path, monkeypatc
     assert changed.status_code == 200
     assert changed.content == payload
 
+    for method in (client.get, client.head):
+        for validator in [head.headers["etag"], "W/" + head.headers["etag"], "*", '"old", ' + head.headers["etag"]]:
+            cached = method(
+                "/v1/jobs/job_download_contract/artifacts/audio.m4a", params=params,
+                headers={"if-none-match": validator, "range": "bytes=2-5"},
+            )
+            assert cached.status_code == 304
+            assert cached.content == b""
+            assert cached.headers["etag"] == head.headers["etag"]
+    date_cached = client.get(
+        "/v1/jobs/job_download_contract/artifacts/audio.m4a", params=params,
+        headers={"if-modified-since": head.headers["last-modified"]},
+    )
+    assert date_cached.status_code == 304
+    etag_precedes_date = client.get(
+        "/v1/jobs/job_download_contract/artifacts/audio.m4a", params=params,
+        headers={"if-none-match": '"old"', "if-modified-since": head.headers["last-modified"]},
+    )
+    assert etag_precedes_date.status_code == 200
+
     unsatisfied = client.get(
         "/v1/jobs/job_download_contract/artifacts/audio.m4a",
         params=params,

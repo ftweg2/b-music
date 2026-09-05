@@ -4,7 +4,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/badge/release-1.2.0-7c3aed.svg)](https://github.com/ftweg2/b-music/releases/tag/v1.2.0)
 
-B-Music is a local-first Bilibili music discovery app with a separate, Dockerized audio kernel. It helps a trusted local user search and rank music-like videos, keep a metadata-only library, and prepare original audio from authorized CTF material or videos the user can normally access.
+B-Music is a local-first Bilibili music discovery app with a separate, Dockerized audio kernel. It helps a trusted local user search Bilibili videos, keep a metadata-only library, and prepare original audio from authorized CTF material or videos the user can normally access.
 
 B-Music 是一个本地优先的 Bilibili 音乐发现项目。Web App 负责搜索、排序、收藏、播放和客户端下载体验；Docker 内核负责登录态与授权音频处理，二者通过 HTTP API 隔离。
 
@@ -15,7 +15,8 @@ B-Music 是一个本地优先的 Bilibili 音乐发现项目。Web App 负责搜
 ## Highlights
 
 - Chinese Next.js interface for search, followed creators, favorites, queues, streaming playback, and device-owned offline downloads.
-- Explicit ranking with text relevance, creator preference, music likelihood, recency, and interaction signals.
+- Followed-creator-first search without custom scores, literal multi-term local lookup, and explicit failures and fixed-source pagination.
+- Owner-scoped playlists with durable metadata snapshots, editable order, whole-playlist playback and queueing.
 - Metadata-only App storage: no App-side audio/video copies, cookies, browser profiles, or signed media URLs; downloads stream directly to the client device.
 - Dockerized FastAPI kernel with `api_dash`, `browser_network`, and `mse_sourcebuffer` strategies.
 - Kernel-owned Bilibili login state with QR login and user-supplied cookie/storage-state import.
@@ -114,6 +115,10 @@ Use B-Music only for authorized CTF material or videos the authenticated user ca
 
 See [SECURITY.md](SECURITY.md), [kernel security boundaries](kernel/docs/SECURITY_BOUNDARY.md), and [App security boundaries](bili-music-app/src/docs/SECURITY_BOUNDARY.md).
 
+## Current workspace iteration
+
+Playlist creation/editing, followed-creator priority, and kernel lifecycle hardening are implemented in the current source. See [playlist functionality](bili-music-app/src/docs/PLAYLISTS.md) and [kernel stability changes](kernel/docs/STABILITY.md). These source changes do not imply a newly published release or an already redeployed container.
+
 ## Documentation
 
 - [Kernel architecture](kernel/docs/ARCHITECTURE.md)
@@ -121,6 +126,8 @@ See [SECURITY.md](SECURITY.md), [kernel security boundaries](kernel/docs/SECURIT
 - [Strategy policy](kernel/docs/STRATEGY_POLICY.md)
 - [Cookie import](kernel/docs/COOKIE_IMPORT.md)
 - [App API usage](bili-music-app/src/docs/API_USAGE.md)
+- [Isolated VPS deployment](deploy/README.md)
+- [Performance and deployment verification](bili-music-app/src/docs/PERFORMANCE_DEPLOYMENT.md)
 - [Deployment guide](bili-music-app/src/docs/CLOUD_DEPLOYMENT.md)
 - [Contributing](CONTRIBUTING.md)
 - [Support](SUPPORT.md)

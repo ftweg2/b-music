@@ -30,7 +30,9 @@ export type RawSearchResult = {
 
 export interface SearchProvider {
   name: string;
+  maxPageSize?: number;
   supportsConcurrentSearch?: boolean;
+  searchPage?(keyword: string, options: SearchOptions): Promise<{ results: RawSearchResult[]; hasNextPage: boolean; totalPages?: number }>;
   searchVideos(keyword: string, options: SearchOptions): Promise<RawSearchResult[]>;
   refreshCreatorLatest?(creator: PreferredCreator, options: RefreshOptions): Promise<RawSearchResult[]>;
 }

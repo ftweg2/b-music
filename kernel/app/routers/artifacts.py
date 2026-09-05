@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import FileResponse
+from email.utils import parsedate_to_datetime
+
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import FileResponse, Response
 
 from app.job_manager import JobNotFoundError, artifact_path, list_artifacts, verify_job_owner
 from app.profile_manager import ProfileOwnershipError
@@ -32,8 +34,9 @@ def get_artifacts(
 def download_artifact(
     job_id: str,
     name: str,
+    request: Request,
     external_owner_id: str = Query(..., min_length=1, max_length=128),
-) -> FileResponse:
+) -> Response:
     try:
         verify_job_owner(job_id, external_owner_id)
         path = artifact_path(job_id, name)
@@ -57,4 +60,24 @@ def download_artifact(
         headers["X-Content-SHA256"] = str(artifact["sha256"])
         headers["X-File-Size"] = str(artifact["size_bytes"])
         headers["ETag"] = f'"sha256-{artifact["sha256"]}"'
-    return FileResponse(path, filename=path.name, headers=headers)
+    response = FileResponse(path, filename=path.name, headers=headers, stat_result=path.stat())
+    # FileResponse implements ranges and If-Range, but not cache validation.
+    # Authorization and artifact existence must be checked before returning 304.
+    etag = response.headers.get("etag", "")
+    validators = request.headers.get("if-none-match")
+    unchanged = False
+    if validators is not None:
+        unchanged = any(tag.strip().removeprefix("W/") in ("*", etag) for tag in validators.split(","))
+    elif modified_since := request.headers.get("if-modified-since"):
+        try:
+            since = parsedate_to_datetime(modified_since)
+            modified = parsedate_to_datetime(response.headers["last-modified"])
+            unchanged = since.tzinfo is not None and modified <= since
+        except (ValueError, TypeError, OverflowError):
+            pass
+    if unchanged:
+        return Response(status_code=304, headers={
+            key: value for key, value in response.headers.items()
+            if key not in {"content-length", "content-type", "content-disposition"}
+        })
+    return response

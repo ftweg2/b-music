@@ -1,0 +1,12 @@
+import fs from "node:fs";
+import path from "node:path";
+import {spawn} from "node:child_process";
+import {createGzip} from "node:zlib";
+import {pipeline} from "node:stream/promises";
+const tag=process.argv[2];if(!tag||!/^[a-zA-Z0-9_.-]+$/.test(tag))throw new Error("Release tag required");
+const directory=path.join(import.meta.dirname,"bundles");fs.mkdirSync(directory,{recursive:true});
+const file=path.join(directory,"images-"+tag+".tar.gz");
+const child=spawn("docker",["save","bmusic-app:"+tag,"bmusic-kernel:"+tag],{stdio:["ignore","pipe","inherit"]});
+const exited=new Promise((resolve,reject)=>{child.on("error",reject);child.on("exit",code=>code===0?resolve():reject(new Error("docker save exit "+code)));});
+await Promise.all([exited,pipeline(child.stdout,createGzip({level:1}),fs.createWriteStream(file))]);
+console.log(JSON.stringify({file,bytes:fs.statSync(file).size}));

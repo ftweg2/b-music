@@ -11,6 +11,7 @@ from app.job_manager import cleanup_old_artifacts, recover_interrupted_runtime
 from app.profile_manager import recover_stale_login_sessions, shutdown_login_runtimes
 from app.routers import artifacts, diagnostics, jobs, profiles, search, strategies, videos
 from app.schemas import HealthResponse
+from app.browser.context_manager import shutdown_browser_contexts
 
 
 settings = get_settings()
@@ -28,6 +29,7 @@ async def lifespan(_app: FastAPI):
     finally:
         await jobs.shutdown_job_tasks()
         await shutdown_login_runtimes()
+        await shutdown_browser_contexts()
 
 
 app = FastAPI(

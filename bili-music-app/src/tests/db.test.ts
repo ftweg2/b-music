@@ -17,7 +17,6 @@ test("candidate metadata upsert updates by bvid", () => {
   createPreferredCreator({
     biliMid: "111111",
     name: "Star Sea Music",
-    priorityWeight: 70
   });
   const first = upsertCandidateVideo({
     bvid: "BV1mock0001A",
@@ -34,10 +33,6 @@ test("candidate metadata upsert updates by bvid", () => {
     tagsJson: "[]",
     searchKeyword: "night",
     sourceProvider: "mock",
-    musicLikelihoodScore: 1,
-    preferredCreatorBoost: 70,
-    finalScore: 80,
-    scoreBreakdownJson: "{}"
   });
   const second = upsertCandidateVideo({ ...first, title: "new title" });
   assert.equal(first.id, second.id);

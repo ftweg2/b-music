@@ -45,6 +45,7 @@ export function sanitizeMid(value: unknown): string | null {
 }
 
 export function clampNumber(value: unknown, min: number, max: number, fallback: number): number {
+  if (value === null || value === undefined || value === "") return fallback;
   const num = Number(value);
   if (!Number.isFinite(num)) {
     return fallback;

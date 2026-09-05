@@ -1,3 +1,4 @@
+import { apiEndpoint, apiOptions, ApiError, positiveId as apiPositiveId } from "@/lib/api";
 import { NextResponse } from "next/server";
 
 import { currentAppOwnerId } from "@/lib/appOwner";
@@ -11,10 +12,10 @@ type Params = {
   params: Promise<{ id: string }>;
 };
 
-export async function GET(_request: Request, { params }: Params) {
+async function getHandler(_request: Request, { params }: Params) {
   try {
     const { id } = await params;
-    const track = await getSyncedTrack(Number(id), await currentAppOwnerId());
+    const track = await getSyncedTrack(apiPositiveId(id), await currentAppOwnerId());
     if (!track) {
       return NextResponse.json({ error: "Track 不存在" }, { status: 404 });
     }
@@ -28,6 +29,10 @@ export async function GET(_request: Request, { params }: Params) {
       }
     );
   } catch (error) {
+    if (error instanceof ApiError) throw error;
     return NextResponse.json({ error: sanitizeText(error) }, { status: 400 });
   }
 }
+
+export const GET = apiEndpoint("GET", getHandler);
+export const OPTIONS = apiOptions(["GET"]);

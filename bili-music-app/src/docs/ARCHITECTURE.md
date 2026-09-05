@@ -11,7 +11,6 @@ flowchart LR
   Provider --> Bili["bilibiliProvider"]
   Provider --> KernelSearch["kernelProvider"]
   Provider -. tests only .-> Mock["mockProvider"]
-  Routes --> Ranker["Ranking + music heuristics"]
   Routes --> Library["Local library: favorites + followed UP"]
   Routes --> Tracks["Track preparation + stream/download proxy"]
   Tracks -- HTTP jobs/artifacts --> Kernel["External extraction kernel"]
@@ -24,13 +23,13 @@ The app stores only metadata. It does not persist media in App storage, store co
 - `src/app`: pages and API routes.
 - `src/components`: React UI components.
 - `src/lib/db.ts`: SQLite metadata persistence.
-- `src/lib/search`: provider interface, Bilibili/kernel providers, test-only mock provider, ranking, heuristics, cache.
+- `src/lib/search`: provider interface, Bilibili/kernel providers, test-only mock provider, ordered metadata results and cache.
 - `src/lib/tracks.ts`: Track lifecycle, kernel job polling, artifact metadata sync.
 - `src/lib/kernelClient.ts`: HTTP-only kernel integration.
 
 ## Local Library
 
-The App has a metadata-only local library. `favorite_videos` stores candidate ids and lightweight notes; `preferred_creators` stores followed UP creators and ranking weights. Search merges normal local matches, followed-UP local matches, favorites, and a small remote followed-UP expansion before ranking.
+The App has a metadata-only library, partitioned by the Bilibili identity verified by the kernel. It never trusts a client-supplied owner cookie. `favorite_videos` stores candidate ids and lightweight notes; `preferred_creators` stores bookmarked UP creators; `playback_ranges` stores account/BV start/end metadata and optimistic revisions. The first verified account adopts the legacy library once; later account switches never reassign it. Online results prioritize followed creators within the returned page, preserving source order within each group; local search applies the same priority before pagination. There are no numeric preference weights or background creator search expansions.
 
 This local library never writes to Bilibili. It also never stores cookies, media files, or browser state.
 
@@ -49,4 +48,4 @@ Playback flow:
 
 App ownership and kernel artifact ownership are stored separately. The App owner scopes local Track access; the immutable kernel owner is used only for internal job/artifact requests and is never returned to clients.
 
-For small cloud machines, first-click playback defaults to forced `api_dash` instead of full `auto` fallback. This keeps the common path lightweight; browser-based fallback remains available from player settings and queued candidates can be explicitly prewarmed one at a time.
+First-click playback uses automatic api_dash → browser_network processing. This explicit strategy list excludes experimental MSE unless chosen by the operator. Client preparation uses cancellable, sequential polling with a five-minute ceiling, and saved player state is validated before it can be written back.

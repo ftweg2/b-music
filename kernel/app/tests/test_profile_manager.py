@@ -2,6 +2,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from threading import Barrier
+from contextlib import contextmanager
 
 import pytest
 
@@ -58,6 +59,27 @@ def make_settings(tmp_path) -> Settings:
         artifacts_dir=tmp_path / "artifacts",
         profiles_dir=tmp_path / "profiles",
     )
+
+
+def test_existing_profile_lookup_does_not_take_a_write_transaction(tmp_path, monkeypatch):
+    import app.profile_manager as profiles
+    settings = make_settings(tmp_path)
+    init_db(settings)
+    first = create_or_get_profile("read-only-owner", settings)
+    statements = []
+    original = profiles.get_connection
+
+    @contextmanager
+    def traced(settings=None):
+        with original(settings) as conn:
+            conn.set_trace_callback(statements.append)
+            yield conn
+
+    monkeypatch.setattr(profiles, "get_connection", traced)
+    repeated = create_or_get_profile("read-only-owner", settings)
+    assert repeated["profile_id"] == first["profile_id"]
+    assert repeated["status"] == "exists"
+    assert not any(sql.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE", "BEGIN")) for sql in statements)
 
 
 def test_login_qr_is_not_readable_after_session_terminal(tmp_path) -> None:

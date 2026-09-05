@@ -30,7 +30,7 @@ def test_auto_mode_accepts_user_strategy_order() -> None:
     assert order[:2] == [StrategyName.MSE_SOURCEBUFFER, StrategyName.API_DASH]
 
 
-def test_auto_mode_can_consider_success_metrics() -> None:
+def test_metrics_never_override_explicit_or_default_order() -> None:
     metrics = {
         StrategyName.API_DASH: StrategyMetricSnapshot(
             strategy_name=StrategyName.API_DASH,
@@ -56,7 +56,7 @@ def test_auto_mode_can_consider_success_metrics() -> None:
         logged_in=True,
     )
     assert StrategyName.BROWSER_NETWORK in order
-    assert order.index(StrategyName.BROWSER_NETWORK) <= order.index(StrategyName.API_DASH)
+    assert order == [StrategyName.API_DASH, StrategyName.BROWSER_NETWORK, StrategyName.MSE_SOURCEBUFFER]
 
 
 def test_network_scoring_rejects_captcha_json() -> None:

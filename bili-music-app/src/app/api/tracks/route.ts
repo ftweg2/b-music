@@ -1,3 +1,4 @@
+import { apiEndpoint, apiOptions, ApiError, queryInteger } from "@/lib/api";
 import { NextResponse } from "next/server";
 
 import { currentAppOwnerId } from "@/lib/appOwner";
@@ -5,16 +6,16 @@ import { listTracks, markExpiredReadyTracks } from "@/lib/db";
 import type { TrackStatus } from "@/lib/models";
 import { clampNumber } from "@/lib/sanitize";
 import { getSyncedTracks } from "@/lib/tracks";
-import { toTrackApiResource } from "@/lib/trackApi";
+import { toTrackApiResources } from "@/lib/trackApi";
 
 export const runtime = "nodejs";
 
 const TRACK_STATUSES = new Set<TrackStatus>(["pending", "preparing", "ready", "expired", "failed"]);
 
-export async function GET(request: Request) {
+async function getHandler(request: Request) {
   const url = new URL(request.url);
-  const limit = Math.round(clampNumber(url.searchParams.get("limit"), 1, 100, 50));
-  const offset = Math.round(clampNumber(url.searchParams.get("offset"), 0, 100_000, 0));
+  const limit = queryInteger(url.searchParams, "limit", 50, 1, 100);
+  const offset = queryInteger(url.searchParams, "offset", 0, 0, 100_000);
   const statusValue = url.searchParams.get("status") as TrackStatus | null;
   if (statusValue && !TRACK_STATUSES.has(statusValue)) {
     return NextResponse.json(
@@ -30,7 +31,7 @@ export async function GET(request: Request) {
   const preparing = listed.filter((track) => track.status === "preparing").slice(0, 20);
   const syncedPreparing = await getSyncedTracks(preparing.map((track) => track.id), ownerId);
   const syncedById = new Map(syncedPreparing.filter((track) => track !== null).map((track) => [track.id, track]));
-  const tracks = listed.map((track) => toTrackApiResource(syncedById.get(track.id) || track));
+  const tracks = toTrackApiResources(listed.map((track) => syncedById.get(track.id) || track));
   return NextResponse.json({
     tracks,
     pagination: {
@@ -41,3 +42,6 @@ export async function GET(request: Request) {
     }
   });
 }
+
+export const GET = apiEndpoint("GET", getHandler);
+export const OPTIONS = apiOptions(["GET"]);

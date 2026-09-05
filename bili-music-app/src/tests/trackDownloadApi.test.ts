@@ -239,10 +239,6 @@ function seedReadyTrack(name: string, kernelOwnerId: string, reuseDatabase = fal
     tagsJson: "[]",
     searchKeyword: "offline",
     sourceProvider: "test",
-    musicLikelihoodScore: 10,
-    preferredCreatorBoost: 0,
-    finalScore: 10,
-    scoreBreakdownJson: "{}"
   });
   const created = createOrReuseTrack(candidate, "local");
   claimTrackPreparation(created.id, `job-${name}`, "local", kernelOwnerId);

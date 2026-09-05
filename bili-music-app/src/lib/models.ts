@@ -1,23 +1,12 @@
 export type InteractionAction = "viewed" | "liked" | "disliked" | "skipped" | "queued" | "extraction_failed";
 export type TrackStatus = "pending" | "preparing" | "ready" | "expired" | "failed";
 
-export type ScoreBreakdown = {
-  textMatch: number;
-  preferredCreator: number;
-  musicLikelihood: number;
-  recency: number;
-  interaction: number;
-  penalty: number;
-  final: number;
-};
-
 export type PreferredCreator = {
   id: number;
   externalOwnerId: string;
   biliMid: string;
   name: string;
   homepageUrl: string | null;
-  priorityWeight: number;
   notes: string | null;
   createdAt: string;
   updatedAt: string;
@@ -39,10 +28,6 @@ export type CandidateVideo = {
   tagsJson: string | null;
   searchKeyword: string | null;
   sourceProvider: string;
-  musicLikelihoodScore: number;
-  preferredCreatorBoost: number;
-  finalScore: number;
-  scoreBreakdownJson: string;
   lastSeenAt: string;
   createdAt: string;
   updatedAt: string;
@@ -107,8 +92,7 @@ export type SearchQueryLog = {
   createdAt: string;
 };
 
-export type CandidateWithScore = CandidateVideo & {
-  scoreBreakdown: ScoreBreakdown;
+export type CandidateItem = CandidateVideo & {
   tags: string[];
   isPreferredCreator: boolean;
   isFavorited: boolean;
@@ -119,6 +103,24 @@ export type CreatePreferredCreatorInput = {
   biliMid: string;
   name: string;
   homepageUrl?: string | null;
-  priorityWeight?: number;
   notes?: string | null;
 };
+
+export type Playlist = {
+  id: number;
+  name: string;
+  description: string;
+  trackCount: number;
+  coverUrl: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type PlaylistItem = {
+  id: number;
+  position: number;
+  addedAt: string;
+  candidate: CandidateItem;
+};
+
+export type PlaylistDetail = Playlist & { items: PlaylistItem[] };

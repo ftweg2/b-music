@@ -9,7 +9,7 @@
     "typecheck": "next typegen && tsc --noEmit",
     "test": "npm run test:integration && npm run test:unit",
     "test:integration": "tsx src/tests/run-tests.ts",
-    "test:unit": "node --import tsx --test src/tests/*.test.ts"
+    "test:unit": "node --import tsx --import ./src/tests/testEnvironment.ts --test src/tests/*.test.ts"
   },
   "dependencies": {
     "next": "16.3.0",

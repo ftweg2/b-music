@@ -48,6 +48,9 @@ class Settings:
     bilibili_user_agent: str
     cors_origins: list[str]
     operator_token: str | None
+    max_active_jobs: int = 2
+    job_timeout_seconds: float = 300.0
+    shutdown_grace_seconds: float = 10.0
 
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -117,6 +120,9 @@ def get_settings() -> Settings:
             if origin.strip()
         ],
         operator_token=_optional_env("KERNEL_OPERATOR_TOKEN"),
+        max_active_jobs=_bounded_int_from_env("MAX_ACTIVE_JOBS", 2, 1, 8),
+        job_timeout_seconds=_bounded_float_from_env("JOB_TIMEOUT_SECONDS", 300.0, 30.0, 1800.0),
+        shutdown_grace_seconds=_bounded_float_from_env("SHUTDOWN_GRACE_SECONDS", 10.0, 1.0, 30.0),
     )
 
 

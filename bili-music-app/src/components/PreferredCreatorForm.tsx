@@ -1,73 +1,107 @@
 "use client";
+import { accountFetch } from "@/lib/accountClient";
 
-import { useState } from "react";
+import { useState, type FormEvent } from "react";
+import { UserPlusIcon, SparklesIcon } from "./Icons";
 
 export function PreferredCreatorForm({ onCreated }: { onCreated?: () => void }) {
-  const [creatorInput, setCreatorInput] = useState("");
-  const [priorityWeight, setPriorityWeight] = useState(70);
+  const [midOrUrl, setMidOrUrl] = useState("");
+  const [name, setName] = useState("");
+  const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
+  const [success, setSuccess] = useState(false);
 
-  async function submit() {
-    const cleanInput = creatorInput.trim();
-    if (!cleanInput) {
-      setMessage("粘贴 UP 主页链接，或者输入 mid 就能关注。");
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const target = midOrUrl.trim();
+    if (!target) {
+      setMessage("请填写 UP 主的 UID 或主页链接");
+      setSuccess(false);
       return;
     }
-    const mid = extractMid(cleanInput);
-    const response = await fetch("/api/creators", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        biliMid: mid || cleanInput,
-        name: mid ? `UP ${mid}` : "",
-        homepageUrl: mid ? `https://space.bilibili.com/${mid}` : cleanInput,
-        priorityWeight
-      })
-    });
-    const payload = await response.json();
-    if (!response.ok) {
-      setMessage(payload.error || "保存失败");
-      return;
+    setLoading(true);
+    setMessage("");
+    setSuccess(false);
+    try {
+      const response = await accountFetch("/api/creators", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          biliMid: /^\d+$/.test(target) ? target : undefined,
+          homepageUrl: /^\d+$/.test(target) ? undefined : target,
+          name: name.trim() || undefined,
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(String(payload.error || "添加失败"));
+      }
+      setSuccess(true);
+      setMessage(`已成功关注 UP 主：${payload.creator?.name || target}`);
+      setMidOrUrl("");
+      setName("");
+      onCreated?.();
+    } catch (error) {
+      setSuccess(false);
+      setMessage(String(error instanceof Error ? error.message : error));
+    } finally {
+      setLoading(false);
     }
-    setMessage("已关注 UP");
-    setCreatorInput("");
-    setPriorityWeight(70);
-    onCreated?.();
   }
 
   return (
-    <section className="panel">
-      <h3 className="panelTitle">关注一个音乐 UP</h3>
-      <div className="creatorQuickForm">
-        <label>
-          UP 主页链接或 mid
-          <input
-            value={creatorInput}
-            onChange={(event) => setCreatorInput(event.target.value)}
-            placeholder="粘贴 https://space.bilibili.com/37069954 或直接输入 37069954"
-          />
-        </label>
-        <label>
-          关注强度
-          <input
-            type="number"
-            min={0}
-            max={100}
-            value={priorityWeight}
-            onChange={(event) => setPriorityWeight(Number(event.target.value))}
-          />
-        </label>
+    <section className="card creatorFormCard">
+      <div className="cardSectionHeader">
+        <div className="sectionIcon">
+          <UserPlusIcon size={18} />
+        </div>
+        <div>
+          <span className="sectionKicker">ADD CREATOR</span>
+          <h3>添加关注</h3>
+          <p>输入 UID 或 Bilibili 个人空间地址，把喜欢的创作者保存在这里。</p>
+        </div>
       </div>
-      <div className="row" style={{ marginTop: 12 }}>
-        <button type="button" onClick={submit}>关注 UP</button>
-        <span className="note">更推荐在搜索结果里点“关注 UP”，会自动带上昵称。</span>
-        <span className="note">{message}</span>
-      </div>
+
+      <form className="creatorForm" onSubmit={submit}>
+        <div className="creatorFormFields">
+          <input
+            value={midOrUrl}
+            onChange={(event) => setMidOrUrl(event.target.value)}
+            placeholder="UP 主 UID 或个人空间 URL"
+            aria-label="UP 主 UID 或个人空间 URL"
+            required
+          />
+          <input
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            placeholder="备注名称（可选）"
+            aria-label="备注名称"
+          />
+          <button
+            className="button creatorSubmit"
+            type="submit"
+            disabled={loading}
+          >
+            {loading ? (
+              <span>解析添加中...</span>
+            ) : (
+              <>
+                <SparklesIcon size={16} />
+                <span>关注 UP</span>
+              </>
+            )}
+          </button>
+        </div>
+
+        {message && (
+          <div className={`formFeedback ${success ? "success" : ""}`} role="status">
+            <span className={`badge ${success ? "success" : "primary"}`}>
+              {success ? "成功" : "提示"}
+            </span>
+            <span>{message}</span>
+          </div>
+        )}
+      </form>
     </section>
   );
-}
-
-function extractMid(value: string): string | null {
-  const match = value.match(/(?:space\.bilibili\.com\/)?(\d{1,24})/);
-  return match ? match[1] : null;
 }

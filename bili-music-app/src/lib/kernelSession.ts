@@ -1,4 +1,6 @@
-import { appOwnerIdFromBiliUid } from "./appOwner";
+import { accountLibraryEnabled, appOwnerIdFromBiliUid, guestAppOwnerId, localAppOwnerId } from "./ownerIdentity";
+import { readAccountOnce } from "./accountRequest";
+import { createHash } from "node:crypto";
 import { readKernelJson } from "./kernelClient";
 import { sanitizeText } from "./sanitize";
 
@@ -23,6 +25,7 @@ export type KernelLoginStatusResponse = {
   bili_uid?: string | null;
   nickname?: string | null;
   last_verified_at?: string | null;
+  login_status?: string;
 };
 
 export function defaultKernelExternalOwnerId(): string {
@@ -45,13 +48,22 @@ export async function getDefaultKernelLoginStatus(): Promise<{
   nickname?: string | null;
   lastVerifiedAt?: string | null;
   appOwnerId: string;
+  libraryMode: "local" | "account";
+  sessionKey: string;
+  loginStatus: string;
 }> {
+  return readAccountOnce(readDefaultKernelLoginStatus);
+}
+
+async function readDefaultKernelLoginStatus() {
   const profile = await ensureDefaultKernelProfile();
   const payload = await readKernelJson<KernelLoginStatusResponse>(
     `/v1/profiles/${encodeURIComponent(profile.profile_id)}/login/status?external_owner_id=${encodeURIComponent(
       profile.external_owner_id
     )}`
   );
+  const verifiedOwner = appOwnerIdFromBiliUid(payload.bili_uid);
+  if (payload.logged_in && verifiedOwner === "local") throw new Error("Kernel returned an invalid logged-in identity");
   return {
     profileId: payload.profile_id,
     externalOwnerId: profile.external_owner_id,
@@ -59,7 +71,10 @@ export async function getDefaultKernelLoginStatus(): Promise<{
     biliUid: payload.bili_uid,
     nickname: payload.nickname,
     lastVerifiedAt: payload.last_verified_at,
-    appOwnerId: payload.logged_in ? appOwnerIdFromBiliUid(payload.bili_uid) : "local"
+    libraryMode: accountLibraryEnabled() ? "account" as const : "local" as const,
+    appOwnerId: accountLibraryEnabled() ? payload.logged_in ? verifiedOwner : guestAppOwnerId() : localAppOwnerId(),
+    sessionKey: createHash("sha256").update(JSON.stringify([payload.profile_id, payload.logged_in, payload.bili_uid, payload.last_verified_at])).digest("hex").slice(0, 24),
+    loginStatus: payload.login_status || (payload.logged_in ? "logged_in" : "logged_out")
   };
 }
 
@@ -77,7 +92,8 @@ export async function startDefaultKernelLogin(): Promise<{
     `/v1/profiles/${encodeURIComponent(profile.profile_id)}/login/start`,
     {
       method: "POST",
-      body: JSON.stringify({ external_owner_id: profile.external_owner_id })
+      body: JSON.stringify({ external_owner_id: profile.external_owner_id }),
+      signal: AbortSignal.timeout(40000)
     }
   );
   return {
@@ -89,4 +105,12 @@ export async function startDefaultKernelLogin(): Promise<{
     qrImageSha256: payload.qr_image_sha256,
     expiresInSeconds: payload.expires_in_seconds
   };
+}
+
+export async function logoutDefaultKernelProfile(): Promise<void> {
+  const profile = await ensureDefaultKernelProfile();
+  await readKernelJson(`/v1/profiles/${encodeURIComponent(profile.profile_id)}/login/logout`, {
+    method: "POST",
+    body: JSON.stringify({ external_owner_id: profile.external_owner_id }),
+  });
 }

@@ -1,127 +1,141 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { accountChanged } from "@/lib/accountEvents";
+import { ACCOUNT_STATUS_EVENT, accountFetch, publishClientAccount, refreshClientAccount, type ClientAccount } from "@/lib/accountClient";
 
 type LoginStatus = {
-  loggedIn: boolean;
-  biliUid?: string | null;
-  nickname?: string | null;
-  lastVerifiedAt?: string | null;
+  loggedIn: boolean; biliUid?: string | null; nickname?: string | null; lastVerifiedAt?: string | null;
+  loginStatus?: string; sessionKey?: string; libraryMode?: "local" | "account";
+  appOwnerId?: string;
 };
 
 export function KernelLoginPanel() {
-  const [message, setMessage] = useState("");
-  const [errorMessage, setErrorMessage] = useState("");
-  const [qrImageUrl, setQrImageUrl] = useState("");
-  const [loginSessionId, setLoginSessionId] = useState("");
-  const [loginStatus, setLoginStatus] = useState<LoginStatus | null>(null);
+  const [status, setStatus] = useState<LoginStatus | null>(null);
+  const latest = useRef<LoginStatus | null>(null);
+  const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const [qr, setQr] = useState("");
+  const [sessionId, setSessionId] = useState("");
+  const [expiresAt, setExpiresAt] = useState(0);
 
-  useEffect(() => {
-    void refreshStatus(false);
-  }, []);
-
-  useEffect(() => {
-    if (!loginSessionId) {
-      return;
-    }
-    const interval = window.setInterval(() => {
-      void refreshStatus(false);
-    }, 3000);
-    return () => window.clearInterval(interval);
-  }, [loginSessionId]);
-
-  async function startLogin() {
-    await runAction(async () => {
-      const payload = await postJson<{
-        loginSessionId: string;
-        qrImageUrl: string;
-        expiresInSeconds?: number;
-      }>("/api/kernel/login/start", {});
-      setLoginSessionId(payload.loginSessionId);
-      setQrImageUrl(`${payload.qrImageUrl}&t=${Date.now()}`);
-      setMessage(`请用 Bilibili 手机端扫码，二维码约 ${payload.expiresInSeconds || 180} 秒内有效`);
-      await refreshStatus(false);
+  function publish(next: LoginStatus) {
+    const previous = latest.current;
+    latest.current = next; setStatus(next);
+    if(next.appOwnerId&&next.sessionKey)publishClientAccount(next as ClientAccount);
+    if (previous && (previous.loggedIn !== next.loggedIn || previous.biliUid !== next.biliUid || previous.sessionKey !== next.sessionKey)) accountChanged();
+  }
+  async function refresh(signal?: AbortSignal) {
+    const response = await fetch("/api/kernel/login/status", {
+      cache: "no-store", signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(12000)]) : AbortSignal.timeout(12000),
     });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "无法读取登录状态");
+    if (signal?.aborted) return null;
+    publish(data); return data as LoginStatus;
   }
-
-  async function refreshStatus(showMessage = true) {
-    try {
-      const response = await fetch("/api/kernel/login/status", { cache: "no-store" });
-      const payload = await response.json();
-      if (!response.ok) {
-        throw new Error(payload.error || "登录状态查询失败");
-      }
-      setLoginStatus(payload);
-      setErrorMessage("");
-      if (showMessage) {
-        setMessage(payload.loggedIn ? "已登录，收藏和关注会保存在这个账号下" : "还未登录，扫码后自动刷新");
-      }
-    } catch (error) {
-      if (showMessage) {
-        setErrorMessage(String(error instanceof Error ? error.message : error));
-      }
+  useEffect(()=>{
+    const receive=(event:Event)=>{
+      const next=(event as CustomEvent<LoginStatus>).detail;
+      if(!next||typeof next.loggedIn!=="boolean")return;
+      const changed=Boolean(latest.current?.sessionKey&&latest.current.sessionKey!==next.sessionKey);
+      latest.current=next;setStatus(next);
+      if(next.loggedIn||changed){setQr("");setSessionId("");}
+    };
+    window.addEventListener(ACCOUNT_STATUS_EVENT,receive);
+    return()=>window.removeEventListener(ACCOUNT_STATUS_EVENT,receive);
+  },[]);
+  useEffect(() => {
+    const controller = new AbortController();
+    void refresh(controller.signal).catch((err) => { if (!controller.signal.aborted) setError(err.message); })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, []);
+  useEffect(() => {
+    if (!sessionId) return;
+    const controller = new AbortController();
+    let timer: number | undefined;
+    const finishQr = () => { setQr(""); setSessionId(""); };
+    async function poll() {
+      if (controller.signal.aborted) return;
+      if (Date.now() >= expiresAt) { finishQr(); setMessage("二维码已过期，请重新扫码登录"); return; }
+      try {
+        const next = await refresh(controller.signal);
+        if (!next || controller.signal.aborted) return;
+        if (next.loggedIn) { finishQr(); setError(""); setMessage(next.libraryMode==="account"?"登录成功，已切换到此账号的音乐库和播放区间。":"登录成功，音乐库已保留。"); return; }
+        if (next.loginStatus && next.loginStatus !== "pending") { finishQr(); setMessage("本次扫码已结束，请重新发起登录"); return; }
+      } catch (err) { if (!controller.signal.aborted) setError(err instanceof Error ? err.message : "登录状态查询失败"); }
+      if (!controller.signal.aborted) timer = window.setTimeout(() => void poll(), 3000);
     }
-  }
+    void poll();
+    return () => { controller.abort(); if (timer !== undefined) window.clearTimeout(timer); };
+  }, [sessionId, expiresAt]);
 
-  async function runAction(action: () => Promise<void>) {
-    setBusy(true);
-    setMessage("");
-    setErrorMessage("");
+  async function beginLogin() {
+    const data = await post<{ loginSessionId: string; qrImageUrl: string; expiresInSeconds: number }>("/api/kernel/login/start", {});
+    setExpiresAt(Date.now() + (data.expiresInSeconds || 180) * 1000);
+    setQr(data.qrImageUrl); setSessionId(data.loginSessionId);
+    publish({ ...(latest.current || {}), loggedIn: false, loginStatus: "pending" });
+    setMessage("请使用要登录的 Bilibili 账号扫码；成功后二维码会自动关闭。");
+  }
+  async function login() {
+    if (busy) return;
+    setBusy(true); setError(""); setMessage("");
+    try { await beginLogin(); } catch (err) { setError(err instanceof Error ? err.message : "二维码创建失败"); }
+    finally { setBusy(false); }
+  }
+  async function logout(switchAccount = false, cancelQr = false) {
+    if (busy) return;
+    const action = cancelQr ? "取消扫码" : switchAccount ? "更换 Bilibili 账号" : "退出 Bilibili 登录";
+    if (!window.confirm(`${action}会清理此设备上的当前登录资料，需要重新扫码才能使用登录态搜索。本地收藏、关注和歌单不会删除。是否继续？`)) return;
+    setBusy(true); setError(""); setMessage("");
+    let cleared = false;
     try {
-      await action();
-    } catch (error) {
-      setErrorMessage(String(error instanceof Error ? error.message : error));
-    } finally {
-      setBusy(false);
-    }
+      await post("/api/kernel/login/logout", { confirmed: true });
+      cleared = true; setQr(""); setSessionId(""); setExpiresAt(0);
+      publish({ loggedIn: false, loginStatus: "logged_out", libraryMode: latest.current?.libraryMode });
+      accountChanged();
+      setMessage("已退出 Bilibili，原账号的收藏、关注、歌单和播放设置均已保留。");
+      if (switchAccount) {
+        const afterLogout=await refreshClientAccount();
+        if(afterLogout.loggedIn)throw new Error("其他设备已登录了另一个账号，请刷新状态后重新确认换号。");
+        await beginLogin();
+      }
+    } catch (err) {
+      setError((cleared ? "旧账号已退出，但新二维码尚未创建。请点击扫码登录重试。 " : "") + (err instanceof Error ? err.message : "操作失败"));
+    } finally { setBusy(false); }
+  }
+  async function check() {
+    if (loading || busy) return;
+    setLoading(true); setError("");
+    try {
+      const next = await refresh();
+      setMessage(next?.loggedIn ? next.libraryMode==="account"?"已读取当前账号。连接同一服务的手机与网页共用此账号的设置。":"已读取当前登录状态。" : "当前未登录，可扫码登录或继续普通搜索。");
+    } catch (err) { setError(err instanceof Error ? err.message : "状态检查失败"); }
+    finally { setLoading(false); }
   }
 
-  return (
-    <section className="kernelPanel">
-      <div className="loginHeader">
-        <div>
-          <h3 className="panelTitle">Bilibili 登录</h3>
-          <p className="note">扫码后即可使用登录态搜索和播放；Cookie 只保存在本机内核 profile 中。</p>
-        </div>
-        <div className={loginStatus?.loggedIn ? "statusPill ok" : "statusPill"}>
-          {loginStatus?.loggedIn ? `已登录：${loginStatus.nickname || loginStatus.biliUid || "Bilibili 用户"}` : "未登录"}
-        </div>
-      </div>
-
-      <div className="row" style={{ marginTop: 12 }}>
-        <button type="button" onClick={startLogin} disabled={busy}>
-          扫码登录
-        </button>
-        <button type="button" className="secondary" onClick={() => refreshStatus(true)} disabled={busy}>
-          刷新状态
-        </button>
-        {message ? <span className="note">{message}</span> : null}
-        {errorMessage ? <span className="errorText" role="alert">{errorMessage}</span> : null}
-      </div>
-
-      {qrImageUrl ? (
-        <div className="qrWrap">
-          <img src={qrImageUrl} alt="Bilibili 登录二维码" />
-          <div>
-            <strong>用 Bilibili 手机端扫码</strong>
-            <p className="note">扫码完成后这里会自动刷新。页面不会看到 Cookie、storage_state 或二维码 token。</p>
-          </div>
-        </div>
-      ) : null}
-    </section>
-  );
+  return <section className="kernelPanel">
+    <div className="loginHeader"><div><h3 className="panelTitle">Bilibili 账号</h3><p className="note">{status?.libraryMode==="account"?"音乐库与播放区间按 B 站账号保存，网页和手机 API 共用；不会同步到 B 站收藏。":"B 站登录用于在线搜索与音频访问；音乐数据由本服务保存。"}</p></div>
+      <span className={status?.loggedIn && !error ? "statusPill ok" : "statusPill"}>{loading ? "检查中" : error && !status ? "暂不可用" : sessionId ? "等待扫码" : status?.loggedIn ? `已登录：${status.nickname || status.biliUid || "Bilibili 用户"}` : "未登录"}</span>
+    </div>
+    <div className="row" style={{ marginTop: 18 }}>
+      {status?.loggedIn ? <><button type="button" onClick={() => void logout(true)} disabled={busy || loading}>更换账号</button><button type="button" className="secondary" onClick={() => void logout()} disabled={busy || loading}>退出登录</button></> :
+        sessionId ? <button type="button" className="secondary" onClick={() => void logout(false, true)} disabled={busy}>取消扫码</button> :
+        <button type="button" onClick={() => void login()} disabled={busy || loading}>{busy ? "正在准备二维码…" : "扫码登录"}</button>}
+      <button type="button" className="secondary" onClick={() => void check()} disabled={busy || loading}>刷新状态</button>
+    </div>
+    <p className="note loginLibraryNote">{status?.libraryMode === "account" ? "当前服务同一时刻使用一个 B 站登录。换号会切换此服务的当前音乐库，原账号数据不会删除，切回后可恢复。" : "换号不会清空本地音乐库。"}音频准备或搜索进行中时，请等任务完成后再换号。</p>
+    {message && <p className="loginMessage" role="status">{message}</p>}
+    {error && <p className="errorText" role="alert">{error}</p>}
+    {qr && <div className="qrWrap"><img src={qr} alt="Bilibili 登录二维码" /><div><strong>使用要登录的账号扫码</strong><p className="note">二维码过期、登录完成或取消后会自动关闭。登录资料仅保存在内核中。</p></div></div>}
+  </section>;
 }
-
-async function postJson<T>(url: string, body: object): Promise<T> {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body)
-  });
-  const payload = await response.json();
-  if (!response.ok) {
-    throw new Error(payload.error || "请求失败");
-  }
-  return payload as T;
+async function post<T>(url: string, body: object): Promise<T> {
+  const response = await accountFetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(45000) });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "登录操作失败");
+  return data as T;
 }

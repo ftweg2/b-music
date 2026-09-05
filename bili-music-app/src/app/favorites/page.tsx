@@ -1,30 +1,47 @@
 import { CandidateList } from "@/components/CandidateList";
+import { listFavoriteVideos } from "@/lib/db";
 import { currentAppOwnerId } from "@/lib/appOwner";
-import { favoriteBvids, listFavoriteVideos } from "@/lib/db";
-import { toCandidateWithScore } from "@/lib/search/cache";
+import { toCandidateItems } from "@/lib/search/cache";
+import { HeartIcon, SparklesIcon } from "@/components/Icons";
+import type { CandidateItem } from "@/lib/models";
 
 export const dynamic = "force-dynamic";
 
 export default async function FavoritesPage() {
   const ownerId = await currentAppOwnerId();
   const rows = listFavoriteVideos(100, ownerId);
-  const candidates = rows.map((row) => row.candidate);
-  const favorites = favoriteBvids(candidates.map((candidate) => candidate.bvid), ownerId);
-  const withScores = candidates.map((candidate) => toCandidateWithScore(candidate, undefined, favorites.has(candidate.bvid)));
+  const candidates = toCandidateItems(rows.map((row) => row.candidate), ownerId);
 
   return (
     <>
       <header className="pageHeader">
-        <h2>收藏</h2>
-        <p>这里是 App 自己记住的收藏候选视频，不会同步到 B 站；需要时可单独下载到设备离线听。</p>
+        <div className="pageTitleRow">
+          <div className="pageIcon rose">
+            <HeartIcon size={20} />
+          </div>
+          <span className="sectionKicker">YOUR LIBRARY</span>
+        </div>
+        <h1>我的收藏</h1>
+        <p>每一次喜欢，都值得被记住。在这里，重逢那些让你心动的声音。</p>
       </header>
-      <section className="panel">
-        <h3 className="panelTitle">收藏夹</h3>
-        <p className="note">
-          收藏会影响搜索排序：你收藏过的视频、关注 UP 的视频，会更容易回到前面。
-        </p>
-      </section>
-      {withScores.length ? <CandidateList candidates={withScores} /> : <div className="empty">收藏夹还空着。搜索结果里点“收藏”就会加入这里。</div>}
+
+      <div className="collectionToolbar">
+        <div>
+          <span>收藏曲目</span>
+          <strong>{candidates.length}</strong>
+        </div>
+        <span className="collectionHint">
+          <SparklesIcon size={12} />
+          按收藏时间倒序排列
+        </span>
+      </div>
+
+      <CandidateList
+        candidates={candidates}
+        title="收藏曲目"
+        emptyTitle="还没有收藏"
+        emptyDescription="遇到喜欢的版本时，点一下心形按钮即可收进这里"
+      />
     </>
   );
 }
