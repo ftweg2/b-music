@@ -93,7 +93,7 @@ export async function startDefaultKernelLogin(): Promise<{
     {
       method: "POST",
       body: JSON.stringify({ external_owner_id: profile.external_owner_id }),
-      signal: AbortSignal.timeout(40000)
+      signal: AbortSignal.timeout(80000)
     }
   );
   return {

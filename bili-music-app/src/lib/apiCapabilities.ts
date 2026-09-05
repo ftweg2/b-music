@@ -44,6 +44,7 @@ export function apiCapabilities() {
       playlistItems: 200
     },
     defaults: {
+      loginStartTimeoutMs: 90000,
       trackPollAfterMs: DEFAULT_TRACK_POLL_AFTER_MS
     },
     endpoints: {

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import base64
 import json
 import shutil
 import time
@@ -316,7 +317,7 @@ async def start_login(
     managed = None
     runtime = None
     try:
-        async with asyncio.timeout(30):
+        async with asyncio.timeout(settings.login_preparation_timeout_seconds):
             with get_connection(settings) as conn:
                 conn.execute(
                     """
@@ -597,6 +598,28 @@ async def _watch_login_session(runtime: LoginRuntime) -> None:
 
 async def _capture_login_qr(page: Any, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    # qrcode.js already renders a PNG next to its canvas. Reuse those exact
+    # pixels without forcing a costly page rasterization on a small VPS.
+    # Only accept a bounded, decoded square image paired with a QR canvas.
+    with contextlib.suppress(Exception):
+        async with asyncio.timeout(12):
+            handle = await page.wait_for_function("""() => {
+                const canvas = Array.from(document.querySelectorAll('canvas')).some(c => c.width >= 64 && c.width <= 1024 && c.width === c.height);
+                const images = Array.from(document.querySelectorAll('img[src^="data:image/png;base64,"]')).filter(i => i.src.length < 1048576);
+                return canvas && images.length === 1 ? images[0].src : null;
+            }""", timeout=10000, polling=100)
+            try:
+                bitmap = await handle.json_value()
+            finally:
+                await handle.dispose()
+        if isinstance(bitmap, str) and bitmap.startswith("data:image/png;base64,") and len(bitmap) < 1048576:
+            payload = base64.b64decode(bitmap.split(",", 1)[1], validate=True)
+            if payload.startswith(b"\x89PNG\r\n\x1a\n") and len(payload) >= 24:
+                width, height = int.from_bytes(payload[16:20], "big"), int.from_bytes(payload[20:24], "big")
+                if width != height or not 64 <= width <= 1024:
+                    raise ValueError("Unexpected QR bitmap dimensions")
+                path.write_bytes(payload)
+                return
     selectors = [
         ".login-scan-box",
         ".qrcode-box",
@@ -605,10 +628,15 @@ async def _capture_login_qr(page: Any, path: Path) -> None:
         "[class*='qr-code']",
         "canvas",
     ]
+    # One shared wait instead of six sequential 3-second waits on pages whose
+    # QR class differs. Keep the original selector priority and page fallback.
+    with contextlib.suppress(Exception):
+        await page.locator(", ".join(f"{selector}:visible" for selector in selectors)).first.wait_for(state="visible", timeout=3000)
     for selector in selectors:
         with contextlib.suppress(Exception):
             locator = page.locator(selector).first
-            await locator.wait_for(state="visible", timeout=3000)
+            if not await locator.is_visible():
+                continue
             await locator.screenshot(path=str(path))
             if path.exists() and path.stat().st_size > 0:
                 return

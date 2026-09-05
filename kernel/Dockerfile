@@ -26,6 +26,13 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 RUN playwright install chrome
 
+# Optional branded headless runtime: keeps AAC/MSE codecs while avoiding the
+# full desktop Chrome startup overhead on small VPS machines.
+ARG CHROME_SHELL_VERSION=152.0.7977.82
+RUN curl -fsSL "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_SHELL_VERSION}/linux64/chrome-headless-shell-linux64.zip" -o /tmp/bmusic-shell.zip \
+    && python -c "import zipfile,os; zipfile.ZipFile('/tmp/bmusic-shell.zip').extractall('/opt'); os.chmod('/opt/chrome-headless-shell-linux64/chrome-headless-shell',0o755)" \
+    && rm /tmp/bmusic-shell.zip
+
 COPY app ./app
 COPY docs ./docs
 

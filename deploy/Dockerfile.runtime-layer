@@ -1,0 +1,7 @@
+# A prebuilt-code/binary packaging layer for an already loaded base image.
+# No npm/pip installation or application compilation happens on the VPS.
+FROM bmusic-kernel:20260905-perf
+COPY --chmod=755 chrome-headless-shell-linux64 /opt/chrome-headless-shell-linux64
+COPY config.py /app/app/config.py
+COPY context_manager.py /app/app/browser/context_manager.py
+COPY profile_manager.py /app/app/profile_manager.py

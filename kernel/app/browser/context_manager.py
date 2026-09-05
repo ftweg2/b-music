@@ -86,7 +86,9 @@ async def _launch_context(profile_id: str, settings: Settings) -> tuple[object, 
         "user_agent": settings.bilibili_user_agent,
         "args": ["--disable-dev-shm-usage"],
     }
-    if settings.playwright_browser_channel:
+    if settings.playwright_executable_path:
+        options["executable_path"] = settings.playwright_executable_path
+    elif settings.playwright_browser_channel:
         options["channel"] = settings.playwright_browser_channel
     context = None
     try:

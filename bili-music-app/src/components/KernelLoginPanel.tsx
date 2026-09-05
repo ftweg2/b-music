@@ -134,7 +134,7 @@ export function KernelLoginPanel() {
   </section>;
 }
 async function post<T>(url: string, body: object): Promise<T> {
-  const response = await accountFetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(45000) });
+  const response = await accountFetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(90000) });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "登录操作失败");
   return data as T;
