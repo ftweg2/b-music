@@ -42,6 +42,6 @@ The kernel remains the only component holding browser profiles and login state.
 
 ## QR Login Boundary
 
-The QR screenshot is transmitted as an image artifact only. The backend must not request QR token internals, cookies, storage state, or browser profile files. Treat the QR screenshot as short-lived sensitive UI material and show it only to the user/team that owns `external_owner_id`.
+The QR PNG is transmitted as an image artifact only. The backend must not request QR token internals, cookies, storage state, or browser profile files. Treat the QR image as short-lived sensitive UI material and show it only to the user/team that owns `external_owner_id`.
 
 For multi-user deployments, use one stable `external_owner_id` per backend user/team. The kernel maps each owner to its own `profile_id`, stores browser files under that profile directory, verifies ownership on login/job/cookie import APIs, and locks a profile during login, cookie import, or extraction jobs.

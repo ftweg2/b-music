@@ -11,3 +11,5 @@ venv/
 *.sqlite*
 *.db
 .git/
+**/http-session.json
+**/.http-session-*

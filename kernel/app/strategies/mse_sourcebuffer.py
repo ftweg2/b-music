@@ -1,23 +1,19 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import hashlib
+import json
 import shutil
 import time
-from typing import Any
+from typing import Any, Callable
 
-from app.artifact_manager import write_json_artifact
+from app.async_work import run_blocking
 from app.bilibili.bvid import normalize_video_url, parse_bvid
 from app.browser.context_manager import BrowserContextManager
+from app.browser.mse_capture import MseCaptureLimitExceeded, MseSegmentSequenceInvalid, MseSegmentSink
 from app.models import StrategyName
 from app.security import sanitize_text
 from app.strategies.browser_network import _trigger_player_load
 from app.strategies.base import StrategyCancelled, StrategyContext, StrategyResult
-
-
-class MseCaptureLimitExceeded(RuntimeError):
-    pass
 
 
 class MseSourceBufferStrategy:
@@ -35,43 +31,19 @@ class MseSourceBufferStrategy:
         manager = BrowserContextManager(context.settings)
         managed = None
         media_probe: CdpMediaProbe | None = None
-        segment_manifest: list[dict[str, object]] = []
-        captured_bytes = 0
-
-        async def receive_segment(_source: object, payload: dict[str, object]) -> None:
-            nonlocal captured_bytes
-            context.raise_if_cancelled()
-            order_value = payload.get("order")
-            order = int(order_value) if order_value is not None else len(segment_manifest)
-            data = base64.b64decode(str(payload.get("dataBase64") or ""))
-            if not data:
-                return
-            if len(data) > context.settings.mse_max_segment_bytes:
-                raise MseCaptureLimitExceeded("MSE segment exceeded capture size limit")
-            if len(segment_manifest) >= context.settings.mse_max_segments:
-                raise MseCaptureLimitExceeded("MSE segment count exceeded capture limit")
-            if captured_bytes + len(data) > context.settings.mse_max_capture_bytes:
-                raise MseCaptureLimitExceeded("MSE capture exceeded total size limit")
-            segment_path = segments_dir / f"segment_{order:06d}.m4s"
-            temp_path = segment_path.with_suffix(".tmp")
-            temp_path.write_bytes(data)
-            temp_path.replace(segment_path)
-            segment_manifest.append(
-                {
-                    "name": segment_path.name,
-                    "order": order,
-                    "mimeType": str(payload.get("mimeType") or ""),
-                    "size": len(data),
-                    "sha256": hashlib.sha256(data).hexdigest(),
-                }
-            )
-            captured_bytes += len(data)
+        sink = MseSegmentSink(context, segments_dir)
+        segment_manifest = sink.manifest
 
         try:
             video_url = normalize_video_url(context.url)
             managed = await manager.open_context(context.profile_id, add_mse_hook=True)
             page = await managed.new_page()
-            await page.expose_binding("__biliCtfAudioSegment", receive_segment)
+            await page.expose_binding("__biliCtfAudioSegment", sink.receive)
+            await page.add_init_script(script="window.__BILI_CTF_AUDIO_MSE_LIMITS__ = " + json.dumps({
+                "segmentBytes": context.settings.mse_max_segment_bytes,
+                "totalBytes": context.settings.mse_max_capture_bytes,
+                "segments": context.settings.mse_max_segments,
+            }) + ";")
             media_probe = CdpMediaProbe()
             await media_probe.attach(page)
             await page.goto(
@@ -86,8 +58,14 @@ class MseSourceBufferStrategy:
                 context.settings.mse_capture_ms,
                 context.settings.mse_playback_rate,
                 context,
+                check_capture=sink.check_error,
             )
             context.raise_if_cancelled()
+            # Freeze capture in the page and wait for every accepted binding to
+            # reach disk before inspecting/merging. No late segment is discarded.
+            async with asyncio.timeout(context.settings.request_timeout_seconds):
+                await page.evaluate("() => window.__biliCtfAudioMseFinish ? window.__biliCtfAudioMseFinish() : null")
+            sink.check_error()
             mse_stats = await _bounded_browser_result(
                 _mse_stats(page),
                 {"installed": False, "error": "MSE stats timed out"},
@@ -97,6 +75,11 @@ class MseSourceBufferStrategy:
                 {"error": "Page media diagnostics timed out"},
             )
             cdp_media = media_probe.summary()
+            if mse_stats.get("captureLimitExceeded"):
+                raise MseCaptureLimitExceeded("MSE capture size or segment limit exceeded")
+            if mse_stats.get("captureFailed"):
+                raise RuntimeError("MSE segment delivery failed")
+            ordered = await sink.finish(raw_path, self.name)
 
             if not segment_manifest:
                 debug_info = {
@@ -123,37 +106,6 @@ class MseSourceBufferStrategy:
                     sanitized_debug_info=debug_info,
                 )
 
-            ordered = sorted(segment_manifest, key=lambda item: int(item["order"]))
-            expected_orders = list(range(len(ordered)))
-            actual_orders = [int(item["order"]) for item in ordered]
-            if actual_orders != expected_orders:
-                return StrategyResult.failed(
-                    failure_code="MSE_SEGMENT_SEQUENCE_INVALID",
-                    reason="Captured MSE segment sequence contained a gap or duplicate",
-                    timings={"duration_ms": _elapsed_ms(started)},
-                    sanitized_debug_info={"segment_count": len(ordered)},
-                )
-            raw_temp_path = raw_path.with_name(f".{raw_path.name}.merge")
-            try:
-                with raw_temp_path.open("wb") as output:
-                    for item in ordered:
-                        context.raise_if_cancelled()
-                        with (segments_dir / str(item["name"])).open("rb") as segment:
-                            shutil.copyfileobj(segment, output, length=1024 * 1024)
-                raw_temp_path.replace(raw_path)
-            finally:
-                try:
-                    raw_temp_path.unlink()
-                except FileNotFoundError:
-                    pass
-
-            write_json_artifact(
-                context.job_dir,
-                "mse_segments_manifest.json",
-                {"segments": ordered},
-                "mse_segments_manifest",
-                self.name,
-            )
             return StrategyResult.succeeded(
                 reason="Captured audio SourceBuffer segments for active job page",
                 selected_media={
@@ -181,8 +133,14 @@ class MseSourceBufferStrategy:
                 timings={"duration_ms": _elapsed_ms(started)},
                 sanitized_debug_info={
                     "segment_count": len(segment_manifest),
-                    "captured_bytes": captured_bytes,
+                    "captured_bytes": sink.captured_bytes,
                 },
+            )
+        except MseSegmentSequenceInvalid as exc:
+            return StrategyResult.failed(
+                failure_code="MSE_SEGMENT_SEQUENCE_INVALID", reason=str(exc),
+                timings={"duration_ms": _elapsed_ms(started)},
+                sanitized_debug_info={"segment_count": len(segment_manifest)},
             )
         except Exception as exc:
             return StrategyResult.failed(
@@ -191,16 +149,21 @@ class MseSourceBufferStrategy:
                 timings={"duration_ms": _elapsed_ms(started)},
             )
         finally:
-            if media_probe is not None:
-                await media_probe.detach()
-            if managed is not None:
+            try:
+                await sink.close()
+            finally:
                 try:
-                    await asyncio.wait_for(managed.close(), timeout=10)
-                except asyncio.TimeoutError:
-                    pass
-                except Exception:
-                    pass
-            shutil.rmtree(segments_dir, ignore_errors=True)
+                    if media_probe is not None:
+                        await media_probe.detach()
+                finally:
+                    try:
+                        if managed is not None:
+                            try:
+                                await asyncio.wait_for(managed.close(), timeout=10)
+                            except Exception:
+                                pass
+                    finally:
+                        await run_blocking(lambda _stop: shutil.rmtree(segments_dir, ignore_errors=True))
 
 
 def _elapsed_ms(started: float) -> int:
@@ -231,12 +194,16 @@ async def _wait_for_mse_activity(
     wait_ms: int,
     playback_rate: float,
     context: StrategyContext,
+    *,
+    check_capture: Callable[[], None] | None = None,
 ) -> None:
     deadline = time.perf_counter() + (wait_ms / 1000)
     interval_ms = 1000
     next_trigger_at = time.perf_counter()
     while time.perf_counter() < deadline:
         context.raise_if_cancelled()
+        if check_capture is not None:
+            check_capture()
         remaining_ms = max(0, int((deadline - time.perf_counter()) * 1000))
         await page.wait_for_timeout(min(interval_ms, remaining_ms))
         now = time.perf_counter()

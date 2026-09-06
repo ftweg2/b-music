@@ -11,6 +11,7 @@ import httpx
 from app.bilibili.bvid import parse_bvid
 from app.bilibili.metadata import BilibiliApiError, fetch_metadata
 from app.bilibili.playurl import fetch_playurl, select_best_audio
+from app.bilibili.profile_api import open_profile_api_client
 from app.models import StrategyName
 from app.security import sanitize_text, sanitize_url
 from app.strategies.base import StrategyCancelled, StrategyContext, StrategyResult
@@ -47,10 +48,15 @@ class ApiDashStrategy:
 
         try:
             context.raise_if_cancelled()
-            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-                metadata = await fetch_metadata(client, bvid, context.settings.bilibili_user_agent)
-                playurl_data = await fetch_playurl(client, metadata, context.settings.bilibili_user_agent)
+            async with open_profile_api_client(context.profile_id, context.settings) as api_client:
+                metadata = await fetch_metadata(api_client, bvid, context.settings.bilibili_user_agent)
+                context.raise_if_cancelled()
+                playurl_data = await fetch_playurl(api_client, metadata, context.settings.bilibili_user_agent)
                 audio = select_best_audio(playurl_data)
+            context.raise_if_cancelled()
+            # The signed CDN URL supplies media authorization. Stream it without
+            # copying the Bilibili session into a separate cookie jar or browser.
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
                 download_info = await download_audio(
                     client,
                     audio.url,

@@ -31,7 +31,7 @@ export default function SettingsPage() {
           <div className="settingsProse">
             <ul>
               <li>
-                <strong>API 优先</strong>：通过 api_dash 准备可访问的音频，保留来源音轨；实际可用性取决于视频与内核服务。
+                <strong>默认极速 API DASH</strong>：通过 API DASH 准备可访问的音频，保留来源音轨；需要时可在播放器设置中切换策略。
               </li>
               <li>
                 <strong>自动策略</strong>：在播放器的设置中选择自动模式，内核会按顺序尝试支持的处理方式，失败时显示原因。

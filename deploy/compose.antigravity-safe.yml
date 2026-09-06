@@ -1,0 +1,18 @@
+# Overlay for the shared 47.254.129.176 host. Never changes Antigravity limits.
+services:
+  app:
+    environment:
+      NODE_OPTIONS: --max-old-space-size=96
+    mem_limit: 160m
+    memswap_limit: 160m
+    cpus: 0.25
+    cpu_shares: 128
+    oom_score_adj: 800
+  kernel:
+    mem_limit: 320m
+    # Total RAM + swap: keep resident RAM capped, allow Chromium's cold pages
+    # up to 512 MiB of the host's existing swap instead of killing its renderer.
+    memswap_limit: 832m
+    cpus: 0.50
+    cpu_shares: 128
+    oom_score_adj: 900

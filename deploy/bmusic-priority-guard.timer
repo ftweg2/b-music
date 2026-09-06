@@ -1,0 +1,11 @@
+[Unit]
+Description=Check B-Music host headroom and primary service health
+
+[Timer]
+OnBootSec=45
+OnUnitInactiveSec=15
+AccuracySec=2
+Unit=bmusic-priority-guard.service
+
+[Install]
+WantedBy=timers.target

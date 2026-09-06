@@ -38,7 +38,7 @@ services:
       driver: json-file
       options: {max-size: 10m, max-file: "3"}
   kernel:
-    image: bmusic-kernel:${BMUSIC_RELEASE:?set BMUSIC_RELEASE}
+    image: bmusic-kernel:${BMUSIC_KERNEL_RELEASE:-${BMUSIC_RELEASE:?set BMUSIC_RELEASE}}
     restart: unless-stopped
     init: true
     ports:
