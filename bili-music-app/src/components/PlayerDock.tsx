@@ -73,7 +73,7 @@ export function PlayerDock() {
   const [volume, setVolume] = useState(0.82);
   const [isMuted, setIsMuted] = useState(false);
   const [playbackMode, setPlaybackMode] = useState<PlaybackMode>("sequence");
-  const [strategy, setStrategy] = useState<StrategyChoice>("auto");
+  const [strategy, setStrategy] = useState<StrategyChoice>("api_dash");
   const [isExpanded, setIsExpanded] = useState(true);
   const [showQueue, setShowQueue] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -84,8 +84,11 @@ export function PlayerDock() {
   const [followed, setFollowed] = useState(false);
   const [following, setFollowing] = useState(false);
   const [creatorMid, setCreatorMid] = useState<string | null>(null);
+  const [favorite, setFavorite] = useState<{ accountId: string; bvid: string; value: boolean } | null>(null);
+  const [favoriting, setFavoriting] = useState(false);
 
   const currentItem = currentIndex >= 0 ? queue[currentIndex] : null;
+  const isFavorited = favorite?.accountId === accountId && favorite.bvid === currentItem?.bvid && favorite.value;
   queueRef.current = queue;
   currentIndexRef.current = currentIndex;
   const streamSrc = track?.status === "ready" ? rangeMediaUrl(track.media.streamUrl || `/api/tracks/${track.id}/stream`, playbackRange ?? undefined) : undefined;
@@ -116,7 +119,7 @@ export function PlayerDock() {
       setQueue(items);setHistory(stored?.history??[]);setCurrentIndex(currentIndexRef.current);
       setPlaybackMode(stored?.playbackMode??"sequence");setVolume(stored?.volume??0.82);
       setTrack(null);setPlaybackRange(null);setDuration(0);setCurrentTime(0);setBusy(false);setShowRange(false);
-      setFollowed(false);setCreatorMid(null);setMessage("");
+      setFollowed(false);setCreatorMid(null);setFavorite(null);setMessage("");
       restoredOwner.current=account.appOwnerId;setAccountId(account.appOwnerId);setHasRestored(true);
     };
     const changed=(event:Event)=>restore((event as CustomEvent<ClientAccount>).detail);
@@ -141,28 +144,40 @@ export function PlayerDock() {
   },[]);
 
   useEffect(()=>{
-    if(!currentItem)return;
+    if(!currentItem||!accountId)return;
     const controller=new AbortController();
     let timer:ReturnType<typeof setTimeout>;
     let reading=false;
+    let favoriteRevision=0;
     setCreatorMid(currentItem.creatorMid??null);setFollowed(false);
     const refresh=async()=>{
       if(reading||controller.signal.aborted||document.visibilityState==="hidden")return;
       reading=true;
+      const requestedFavoriteRevision=favoriteRevision;
       try {
         const [range,details]=await Promise.all([
           getJson<{playbackRange:PlaybackRange}>("/api/playback-ranges/"+currentItem.bvid,controller.signal),
           getJson<{candidate:CandidateItem}>("/api/candidates/"+currentItem.candidateId,controller.signal),
         ]);
         controller.signal.throwIfAborted();
-        if(range.playbackRange.accountId!==knownClientAccount()?.appOwnerId)return;
+        if(accountId!==knownClientAccount()?.appOwnerId||range.playbackRange.accountId!==accountId)return;
         setPlaybackRange(previous=>previous?.revision===range.playbackRange.revision&&previous.accountId===range.playbackRange.accountId&&previous.bvid===range.playbackRange.bvid?previous:range.playbackRange);
         setCreatorMid(details.candidate.creatorMid);setFollowed(details.candidate.isPreferredCreator);
+        // An older metadata response must not undo a newer favorite action.
+        if(requestedFavoriteRevision===favoriteRevision)setFavorite({accountId,bvid:currentItem.bvid,value:details.candidate.isFavorited});
       } catch { /* Keep known settings on transient failures; prepare revalidates before playback. */ }
       finally{reading=false;}
     };
     const tick=async()=>{await refresh();if(!controller.signal.aborted)timer=setTimeout(()=>void tick(),5000);};
-    const library=(event:Event)=>{const change=(event as CustomEvent<LibraryChange>).detail;if(change.kind==="creator"&&change.biliMid===(currentItem.creatorMid||creatorMid))setFollowed(change.followed);};
+    const library=(event:Event)=>{
+      if(accountId!==knownClientAccount()?.appOwnerId)return;
+      const change=(event as CustomEvent<LibraryChange>).detail;
+      if(change.kind==="creator"&&change.biliMid===(currentItem.creatorMid||creatorMid))setFollowed(change.followed);
+      if(change.kind==="favorite"&&change.bvid===currentItem.bvid){
+        favoriteRevision++;
+        setFavorite({accountId,bvid:currentItem.bvid,value:change.favorited});
+      }
+    };
     void tick();
     window.addEventListener("focus",refresh);document.addEventListener("visibilitychange",refresh);window.addEventListener(LIBRARY_CHANGE_EVENT,library);
     return()=>{controller.abort();clearTimeout(timer);window.removeEventListener("focus",refresh);document.removeEventListener("visibilitychange",refresh);window.removeEventListener(LIBRARY_CHANGE_EVENT,library);};
@@ -413,14 +428,20 @@ export function PlayerDock() {
   }
 
   async function favoriteCurrentItem() {
-    if (!currentItem) return;
+    if (!currentItem || favoriting) return;
+    const selectedAccount = knownClientAccount()?.appOwnerId;
+    const isStillCurrent = () => selectedAccount === knownClientAccount()?.appOwnerId && queueRef.current[currentIndexRef.current]?.bvid === currentItem.bvid;
+    setFavoriting(true);
     try {
       await postJson(`/api/favorites`, { candidateId: currentItem.candidateId });
+      if (selectedAccount !== knownClientAccount()?.appOwnerId) return;
       notifyLibraryChange({ kind: "favorite", candidateId: currentItem.candidateId, bvid: currentItem.bvid, favorited: true });
       router.refresh();
-      setMessage(`已将「${currentItem.title}」添加到收藏夹`);
+      if (isStillCurrent()) setMessage(`已将「${currentItem.title}」添加到收藏夹`);
     } catch {
-      setMessage("收藏失败，请稍后重试");
+      if (isStillCurrent()) setMessage("收藏失败，请稍后重试");
+    } finally {
+      setFavoriting(false);
     }
   }
 
@@ -559,12 +580,16 @@ export function PlayerDock() {
             {currentItem && (
               <button
                 type="button"
-                className="iconBtn ghost"
+                className={`iconBtn playerFavoriteButton ${isFavorited ? "isFavorited" : "ghost"}`}
                 style={{ marginLeft: 2 }}
                 onClick={() => void favoriteCurrentItem()}
-                title="收藏当前歌曲"
+                disabled={favoriting}
+                aria-label={isFavorited ? "已收藏当前歌曲" : "收藏当前歌曲"}
+                aria-pressed={isFavorited}
+                aria-busy={favoriting}
+                title={isFavorited ? "已收藏当前歌曲" : "收藏当前歌曲"}
               >
-                <HeartIcon size={16} />
+                <HeartIcon size={16} filled={isFavorited} />
               </button>
             )}
           </div>
@@ -819,7 +844,7 @@ export function PlayerDock() {
                   onChange={(e) => setStrategy(e.target.value as StrategyChoice)}
                   style={{ width: "100%", marginBottom: 12 }}
                 >
-                  <option value="api_dash">极速 api_dash (推荐云机模式)</option>
+                  <option value="api_dash">极速 API DASH（默认）</option>
                   <option value="auto">自动故障转移 (api_dash → browser)</option>
                   <option value="browser_network">浏览器内核（使用内核登录态）</option>
                   <option value="mse_sourcebuffer">实验性 MSE SourceBuffer</option>

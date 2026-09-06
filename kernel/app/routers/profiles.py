@@ -26,6 +26,7 @@ from app.schemas import (
     ProfileCreateResponse,
 )
 from app.security import sanitize_text
+from app.bilibili.qr_login import LoginFlowError
 
 
 router = APIRouter(prefix="/v1/profiles", tags=["profiles"])
@@ -45,10 +46,10 @@ async def login_logout(profile_id: str, request: LoginStartRequest) -> dict[str,
         raise HTTPException(status_code=400, detail="未能安全清理登录资料，请重试") from exc
 
 
-@router.post("", response_model=ProfileCreateResponse)
-def create_profile(request: ProfileCreateRequest) -> dict[str, str]:
+@router.post("", response_model=ProfileCreateResponse, response_model_exclude_unset=True)
+def create_profile(request: ProfileCreateRequest) -> dict[str, object]:
     try:
-        return create_or_get_profile(request.external_owner_id)
+        return create_or_get_profile(request.external_owner_id, include_login_status=request.include_login_status)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=sanitize_text(exc)) from exc
 
@@ -60,6 +61,11 @@ async def login_start(
 ) -> dict[str, object]:
     try:
         return await start_login(profile_id, request.external_owner_id)
+    except LoginFlowError as exc:
+        headers = {"X-Error-Code": exc.code, "X-Error-Retryable": str(exc.retryable).lower()}
+        if exc.retryable:
+            headers["Retry-After"] = "3"
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers=headers) from exc
     except ProfileLockedError as exc:
         raise HTTPException(status_code=409, detail=sanitize_text(exc), headers={"Retry-After": "2"}) from exc
     except ProfileOwnershipError as exc:
@@ -68,8 +74,9 @@ async def login_start(
         raise HTTPException(status_code=404, detail="profile not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=sanitize_text(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=sanitize_text(exc)) from exc
+    except (RuntimeError, OSError) as exc:
+        raise HTTPException(status_code=503, detail="登录组件暂时不可用，请稍后重试。",
+                            headers={"X-Error-Code": "LOGIN_SERVICE_UNAVAILABLE", "Retry-After": "3"}) from exc
 
 
 @router.get("/{profile_id}/login/status", response_model=LoginStatusResponse)
@@ -78,8 +85,7 @@ def login_status(
     external_owner_id: str = Query(..., min_length=1, max_length=128),
 ) -> dict[str, object]:
     try:
-        verify_profile_owner(profile_id, external_owner_id)
-        return get_login_status(profile_id)
+        return get_login_status(profile_id, external_owner_id=external_owner_id)
     except ProfileOwnershipError as exc:
         raise HTTPException(status_code=403, detail=sanitize_text(exc)) from exc
     except ProfileNotFoundError as exc:

@@ -145,7 +145,7 @@ def test_cancelled_login_start_releases_profile_lock(tmp_path, monkeypatch) -> N
         def __init__(self, _settings) -> None:
             pass
 
-        async def open_context(self, _profile_id):
+        async def open_request_context(self, _profile_id):
             raise asyncio.CancelledError
 
     monkeypatch.setattr(

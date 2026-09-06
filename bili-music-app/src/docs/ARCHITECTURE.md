@@ -48,4 +48,4 @@ Playback flow:
 
 App ownership and kernel artifact ownership are stored separately. The App owner scopes local Track access; the immutable kernel owner is used only for internal job/artifact requests and is never returned to clients.
 
-First-click playback uses automatic api_dash → browser_network processing. This explicit strategy list excludes experimental MSE unless chosen by the operator. Client preparation uses cancellable, sequential polling with a five-minute ceiling, and saved player state is validated before it can be written back.
+First-click playback defaults to forced api_dash processing. App prepare/refresh requests that omit all strategy parameters use the same default. Users can explicitly select automatic api_dash → browser_network processing or another strategy in the player; automatic playback excludes experimental MSE unless chosen by the operator. Client preparation uses cancellable, sequential polling with a five-minute ceiling, and saved player state is validated before it can be written back.

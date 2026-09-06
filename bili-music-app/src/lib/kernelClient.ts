@@ -29,7 +29,7 @@ export class KernelRequestError extends Error {
   readonly status: number | null;
   readonly retryable: boolean;
 
-  constructor(message: string, status: number | null, retryable: boolean, public readonly submissionRejected = false, public readonly retryAfterSeconds?: number) {
+  constructor(message: string, status: number | null, retryable: boolean, public readonly submissionRejected = false, public readonly retryAfterSeconds?: number, public readonly code?: string) {
     super(message);
     this.name = "KernelRequestError";
     this.status = status;
@@ -108,7 +108,10 @@ export async function readKernelJson<T>(path: string, init?: RequestInit): Promi
     throw new KernelRequestError(
       `暂时无法连接音频内核：${error instanceof Error ? error.message : "network error"}`,
       null,
-      true
+      true,
+      false,
+      undefined,
+      error instanceof Error && error.name === "TimeoutError" ? "KERNEL_REQUEST_TIMEOUT" : undefined
     );
   }
   const payload = (await response.json().catch(() => ({}))) as { detail?: string; error?: string };
@@ -116,9 +119,10 @@ export async function readKernelJson<T>(path: string, init?: RequestInit): Promi
     throw new KernelRequestError(
       payload.detail || payload.error || `内核请求失败：HTTP ${response.status}`,
       response.status,
-      response.status === 408 || response.status === 429 || response.status >= 500 || Number(response.headers.get("retry-after")) > 0,
+      response.headers.get("x-error-retryable") === "false" ? false : response.status === 408 || response.status === 429 || response.status >= 500 || Number(response.headers.get("retry-after")) > 0,
       response.headers.get("x-kernel-job-accepted") === "false",
-      Number(response.headers.get("retry-after")) > 0 ? Number(response.headers.get("retry-after")) : undefined
+      Number(response.headers.get("retry-after")) > 0 ? Number(response.headers.get("retry-after")) : undefined,
+      /^[A-Z][A-Z0-9_]{0,63}$/.test(response.headers.get("x-error-code") || "") ? response.headers.get("x-error-code")! : undefined
     );
   }
   return payload as T;

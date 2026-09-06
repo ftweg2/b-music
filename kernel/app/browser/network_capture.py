@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import heapq
 import re
 from dataclasses import asdict, dataclass
 
@@ -199,17 +200,28 @@ def score_candidate(
 
 
 class NetworkCapture:
-    def __init__(self) -> None:
-        self._candidates: list[MediaCandidate] = []
+    def __init__(self, diagnostic_limit: int = 10) -> None:
+        # The service only publishes the top ten diagnostic candidates. Retain
+        # that ranking and the independently selected audio, not every repeated
+        # signed URL observed during the capture window.
+        self._diagnostic_limit = max(1, diagnostic_limit)
+        self._candidate_heap: list[tuple[float, int, MediaCandidate]] = []
+        self._candidate_count = 0
+        self._best: MediaCandidate | None = None
         self._response_count = 0
         self._rejected_reasons: dict[str, int] = {}
         self._pending_tasks: set[asyncio.Task[None]] = set()
         self._attached_page: object | None = None
         self._response_handler: object | None = None
+        self._body_readers = asyncio.Semaphore(4)
 
     def attach(self, page: object) -> None:
         def on_response(response: object) -> None:
-            task = asyncio.create_task(self.record_response(response))
+            # Response headers/URLs are already available synchronously. Do not
+            # allocate a coroutine/task for every image, script or media segment.
+            if self._record_without_body(response):
+                return
+            task = asyncio.create_task(self._record_with_body(response))
             self._pending_tasks.add(task)
             task.add_done_callback(self._pending_tasks.discard)
 
@@ -232,8 +244,30 @@ class NetworkCapture:
         self._response_handler = None
 
     async def record_response(self, response: object) -> None:
+        if not self._record_without_body(response):
+            await self._record_with_body(response)
+
+    def _record_without_body(self, response: object) -> bool:
+        self._response_count += 1
         try:
-            self._response_count += 1
+            if int(response.status) == 200 and "playurl" in str(response.url).lower():
+                return False
+            self._record_metadata(response)
+        except Exception:
+            pass
+        return True
+
+    async def _record_with_body(self, response: object) -> None:
+        try:
+            async with self._body_readers:
+                if await self._record_playurl_candidates(response, str(response.request.resource_type)):
+                    return
+            self._record_metadata(response)
+        except Exception:
+            pass
+
+    def _record_metadata(self, response: object) -> None:
+        try:
             request = response.request
             headers = dict(response.headers)
             url = str(response.url)
@@ -242,17 +276,12 @@ class NetworkCapture:
             content_type = headers.get("content-type") or headers.get("Content-Type") or ""
             length = _content_length(headers)
 
-            if status == 200 and "playurl" in url.lower():
-                extracted = await self._record_playurl_candidates(response, resource_type)
-                if extracted:
-                    return
-
             score, reasons = score_candidate(url, status, resource_type, headers)
             if score <= 0:
                 for reason in reasons:
                     self._rejected_reasons[reason] = self._rejected_reasons.get(reason, 0) + 1
                 return
-            self._candidates.append(
+            self._remember(
                 MediaCandidate(
                     actual_url=url,
                     sanitized_url=sanitize_url(url) or "<redacted>",
@@ -287,7 +316,7 @@ class NetworkCapture:
                 continue
             bandwidth = int(item.get("bandwidth") or 0)
             score = 80.0 + min(bandwidth / 10000.0, 20.0)
-            self._candidates.append(
+            self._remember(
                 MediaCandidate(
                     actual_url=str(media_url),
                     sanitized_url=sanitize_url(str(media_url)) or "<redacted>",
@@ -302,28 +331,29 @@ class NetworkCapture:
             found = True
         return found
 
+    def _remember(self, candidate: MediaCandidate) -> None:
+        self._candidate_count += 1
+        # Equal scores preserve the first-observed candidate, like max() and
+        # Python's stable sort in the original implementation.
+        if (_media_kind(candidate.actual_url, candidate.content_type, reasons=candidate.reasons) == "audio"
+                and (self._best is None or candidate.score > self._best.score)):
+            self._best = candidate
+        rank = (candidate.score, -self._candidate_count, candidate)
+        if len(self._candidate_heap) < self._diagnostic_limit:
+            heapq.heappush(self._candidate_heap, rank)
+        elif rank[:2] > self._candidate_heap[0][:2]:
+            heapq.heapreplace(self._candidate_heap, rank)
+
     def best_candidate(self) -> MediaCandidate | None:
-        audio_candidates = [
-            candidate
-            for candidate in self._candidates
-            if _media_kind(
-                candidate.actual_url,
-                candidate.content_type,
-                reasons=candidate.reasons,
-            )
-            == "audio"
-        ]
-        if not audio_candidates:
-            return None
-        return max(audio_candidates, key=lambda candidate: candidate.score)
+        return self._best
 
     def sanitized_candidates(self, limit: int = 10) -> list[dict[str, object]]:
-        ordered = sorted(self._candidates, key=lambda candidate: candidate.score, reverse=True)
-        return [candidate.sanitized_dict() for candidate in ordered[:limit]]
+        ordered = sorted(self._candidate_heap, key=lambda entry: entry[:2], reverse=True)
+        return [entry[2].sanitized_dict() for entry in ordered[:limit]]
 
     def sanitized_summary(self) -> dict[str, object]:
         return {
             "response_count": self._response_count,
-            "candidate_count": len(self._candidates),
+            "candidate_count": self._candidate_count,
             "rejected_reasons": dict(sorted(self._rejected_reasons.items())),
         }

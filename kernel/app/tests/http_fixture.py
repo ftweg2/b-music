@@ -42,20 +42,28 @@ from app.strategies import browser_network
 
 BASE = "http://127.0.0.1:8000"
 browser_network.normalize_video_url = lambda url: BASE + "/__fixture/video?" + urlencode({"bvid": browser_network.parse_bvid(url)})
-controls = {"uid": None, "search_error_page": 0, "search_delay": 0.0, "identity_delay": 0.0, "hold_browser": False, "hold_media": False, "fail_media": False}
-metrics = {"launches": 0, "search_requests": [], "browser_stage": False, "media_stage": False, "media_runs": 0}
+controls = {"uid": None, "search_error_page": 0, "search_delay": 0.0, "identity_delay": 0.0, "hold_browser": False, "hold_media": False, "fail_media": False,
+            "login_generate_error": 0, "login_poll_errors": 0, "login_generate_delay": 0.0}
+metrics = {"launches": 0, "search_requests": [], "browser_stage": False, "media_stage": False, "media_runs": 0, "login_generates": 0, "login_polls": 0}
+metrics["http_context_launches"] = 0
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+afooAAAAASUVORK5CYII=")
 
 @app.middleware("http")
 async def slow_identity(request: Request, call_next):
-    if request.url.path.endswith("/login/status"):
+    combined = False
+    if request.method == "POST" and request.url.path == "/v1/profiles":
+        try:
+            combined = bool((await request.json()).get("include_login_status"))
+        except (ValueError, AttributeError):
+            pass
+    if request.url.path.endswith("/login/status") or combined:
         await asyncio.sleep(min(3, float(controls["identity_delay"])))
     return await call_next(request)
 
 original_get = APIRequestContext.get
 async def local_api_get(self, url, **kwargs):
     target = urlsplit(str(url))
-    if target.hostname == "api.bilibili.com":
+    if target.hostname in ("api.bilibili.com", "passport.bilibili.com"):
         url = BASE + "/__fixture/upstream" + target.path + ("?" + target.query if target.query else "")
     elif target.hostname not in ("127.0.0.1", "localhost"):
         raise RuntimeError("Fixture refuses external network access")
@@ -78,6 +86,13 @@ async def launch(profile_id, settings):
     await context.route("**/*", route_request)
     return context, playwright
 browsers._launch_context = launch
+
+original_http_launch = browsers._launch_request_context
+async def launch_http(settings, cookies):
+    context, playwright = await original_http_launch(settings, cookies)
+    metrics["http_context_launches"] += 1
+    return context, playwright
+browsers._launch_request_context = launch_http
 
 original_wait = browser_network._wait_with_cancellation
 async def gated_browser_wait(page, wait_ms, context):
@@ -120,6 +135,8 @@ def fixture_state():
     return {"fixture":"isolated-only", **metrics, "locks":locks, "readers":readers, "active_jobs":active,
             "browser_leases":sum(state.users for state in browsers._STATES.values()),
             "browsers":sum(state.context is not None for state in browsers._STATES.values()),
+            "http_leases":sum(state.request_users for state in browsers._STATES.values()),
+            "http_contexts":sum(state.request_context is not None for state in browsers._STATES.values()),
             "login_watchers":len(profile_manager._LOGIN_RUNTIMES)}
 
 @app.post("/__fixture/control")
@@ -159,6 +176,25 @@ def video():
 def nav():
     uid = controls["uid"]
     return {"code":0,"data":{"isLogin":uid is not None,"mid":uid,"uname":"Fixture " + str(uid)}}
+
+
+@app.get("/__fixture/upstream/x/passport-login/web/qrcode/generate")
+async def generate_qr():
+    metrics["login_generates"] += 1
+    await asyncio.sleep(min(15, max(0, float(controls["login_generate_delay"]))))
+    if controls["login_generate_error"]:
+        return Response(status_code=int(controls["login_generate_error"]))
+    return {"code": 0, "data": {"qrcode_key": "isolated-fixture-not-a-login",
+            "url": "https://account.bilibili.com/h5/account-h5/auth/scan-web?authCode=isolated-fixture-not-a-login"}}
+
+
+@app.get("/__fixture/upstream/x/passport-login/web/qrcode/poll")
+def poll_qr():
+    metrics["login_polls"] += 1
+    if controls["login_poll_errors"]:
+        controls["login_poll_errors"] -= 1
+        return Response(status_code=503)
+    return {"code": 0, "data": {"code": 0 if controls["uid"] is not None else 86101}}
 
 @app.get("/__fixture/upstream/x/web-interface/search/type")
 async def search_upstream(page: int = 1, page_size: int = 20, keyword: str = ""):

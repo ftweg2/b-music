@@ -13,12 +13,14 @@ OutputLiteral = Literal["raw", "m4a", "wav"]
 
 class ProfileCreateRequest(BaseModel):
     external_owner_id: str = Field(min_length=1, max_length=128)
+    include_login_status: bool = False
 
 
 class ProfileCreateResponse(BaseModel):
     profile_id: str
     external_owner_id: str
     status: Literal["created", "exists"]
+    login: LoginStatusResponse | None = None
 
 
 class LoginStartResponse(BaseModel):

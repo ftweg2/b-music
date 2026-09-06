@@ -17,7 +17,14 @@ This kernel is for authorized CTF audio extraction only.
 
 Browser login state stays inside kernel-owned profile storage. A future backend may store profile ownership metadata and sanitized login status, but raw browser profiles and session secrets must never be exported or leaked from the kernel.
 
-QR login is allowed only as normal user-driven login inside the kernel-owned profile. The kernel may return a short-lived QR screenshot image URL for the matching `external_owner_id` and `profile_id`; it must not return QR token internals, cookies, storage state, or browser profile files. Treat QR screenshots as sensitive UI material and do not log them.
+The HTTP runtime's owner-only cookie handoff journal is also profile data, not
+metadata or an audio artifact. It never leaves the kernel, is not served by any
+route, and is removed by the same guarded logout as the browser profile. HTTP and
+browser runtimes for one profile never own independent live cookie jars. Origin
+storage remains in the persistent browser profile. Storage-state initialization
+errors must not quote cookie values in API responses or logs.
+
+QR login is allowed only as normal user-driven login inside the kernel-owned profile, including the first-party web QR endpoints through that profile's shared request context. The kernel may return a short-lived QR PNG image URL for the matching `external_owner_id` and `profile_id`; it must not return QR token internals, cookies, storage state, or browser profile files. Treat QR images as sensitive UI material and do not log them. User confirmation and independently verified Bilibili identity remain required; upstream restrictions must not be bypassed.
 
 ## Allowed Cookie Import
 

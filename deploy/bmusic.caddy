@@ -1,0 +1,9 @@
+# BEGIN BMUSIC MANAGED SITE
+bmusic.ftwegc.com {
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:13100
+    handle_errors {
+        respond "B-Music is temporarily unavailable. The primary service is prioritized." 503
+    }
+}
+# END BMUSIC MANAGED SITE

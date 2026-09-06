@@ -13,6 +13,7 @@ from app.bilibili.bvid import normalize_video_url, parse_bvid
 from app.bilibili.playurl import select_best_audio
 from app.bilibili.wbi import MIXIN_KEY_ENC_TAB
 from app.browser.context_manager import BrowserContextManager
+from app.browser.responses import managed_response
 from app.browser.network_capture import MediaCandidate, NetworkCapture
 from app.media_pipeline import ffprobe_json
 from app.models import StrategyName
@@ -341,9 +342,10 @@ async def _candidate_from_context_playurl(
         params={"bvid": bvid},
         headers=headers,
     )
-    if metadata_response.status != 200:
-        return None
-    metadata_payload = await metadata_response.json()
+    async with managed_response(metadata_response):
+        if metadata_response.status != 200:
+            return None
+        metadata_payload = await metadata_response.json()
     if metadata_payload.get("code") != 0:
         return None
     metadata = metadata_payload.get("data") or {}
@@ -365,9 +367,10 @@ async def _candidate_from_context_playurl(
         params=signed,
         headers=headers,
     )
-    if playurl_response.status != 200:
-        return None
-    playurl_payload = await playurl_response.json()
+    async with managed_response(playurl_response):
+        if playurl_response.status != 200:
+            return None
+        playurl_payload = await playurl_response.json()
     if playurl_payload.get("code") != 0:
         return None
     audio = select_best_audio(playurl_payload.get("data") or {})
@@ -392,7 +395,8 @@ async def _sign_wbi_params_with_context(
         "https://api.bilibili.com/x/web-interface/nav",
         headers={"user-agent": user_agent, "referer": "https://www.bilibili.com/"},
     )
-    payload = await nav_response.json()
+    async with managed_response(nav_response):
+        payload = await nav_response.json()
     wbi_img = ((payload.get("data") or {}).get("wbi_img") or {})
     img_key = _url_stem(str(wbi_img.get("img_url") or ""))
     sub_key = _url_stem(str(wbi_img.get("sub_url") or ""))

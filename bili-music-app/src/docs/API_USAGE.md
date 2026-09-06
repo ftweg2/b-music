@@ -161,6 +161,10 @@ CORS 只解决浏览器来源限制，不提供用户鉴权。默认单用户客
 
 低配服务器首次启动浏览器可能较慢。客户端使用 capabilities.defaults.loginStartTimeoutMs（当前 90000 ms）作为二维码创建请求的上限；这个等待不计入二维码本身的 expiresInSeconds。服务器仍有独立的、有界的准备超时，不会无限等待。
 
+二维码现由内核调用 B 站网页使用的生成/轮询接口后编码，不再加载整个登录页并截图。同一会话的图片在有效期内不变，后台不会每 60 秒偷偷换码；生成中的并发 start 也复用同一次准备。上游轮询的短暂网络错误会在会话有效期内有限重试。客户端仅在 `loggedIn:true` 时视为登录成功，不能把扫码或确认按钮状态当成已验证账号。
+
+登录错误保留统一的 `error/code/retryable/requestId`：`504 / LOGIN_PREPARATION_TIMEOUT` 或 `LOGIN_UPSTREAM_TIMEOUT` 表示准备或上游超时；`502 / LOGIN_UPSTREAM_UNAVAILABLE` 表示连接中断；`503 / LOGIN_UPSTREAM_RESTRICTED` 表示上游限制，`retryable:false` 时不自动重试，也不尝试绕过验证。可重试错误遵守 `Retry-After`，由用户重试时优先复用现有待扫码会话。网关返回非 JSON 错误时显示服务暂不可用，不把 HTML 当正常登录结果。已验证登录时 start 返回 409，换号必须先确认 logout。
+
 二维码地址已包含必要查询参数，不手工填写 profile/owner。登录成功、过期或取消后，旧二维码通常返回 404。
 
 ### 退出与换号
@@ -376,7 +380,7 @@ curl -X POST "$BASE_URL/api/playlists/7/items" -H "Content-Type: application/jso
 
 | 字段 | 规则 |
 | --- | --- |
-| strategyMode | auto 或 force；新客户端可显式使用 auto |
+| strategyMode | auto 或 force；所有策略参数均省略时默认 force + api_dash，显式 strategyOrder 且省略模式时使用 auto |
 | strategy | force 时必须指定 api_dash/browser_network/mse_sourcebuffer 之一 |
 | strategyOrder | auto 时可指定 1–3 个支持的策略；不传使用内核默认顺序 |
 

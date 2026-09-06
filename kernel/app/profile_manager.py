@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
-import base64
 import json
 import shutil
 import time
@@ -17,6 +16,8 @@ from urllib.parse import quote, urlparse
 from .config import Settings, get_settings
 from .db import get_connection
 from .models import LoginStatus, utc_now_iso
+from .bilibili.qr_login import QRChallenge, LoginFlowError, create_qr, poll_qr
+from .browser.responses import managed_response
 from .security import (
     is_bilibili_host,
     sanitize_text,
@@ -60,7 +61,7 @@ class LoginRuntime:
     lock_id: str
     qr_path: Path
     managed: Any
-    page: Any
+    challenge: QRChallenge
     settings: Settings
     expires_at_monotonic: float
     task: asyncio.Task[None] | None = None
@@ -68,6 +69,7 @@ class LoginRuntime:
 
 _LOGIN_RUNTIMES: dict[str, LoginRuntime] = {}
 _LOGIN_RUNTIME_LOCK: asyncio.Lock | None = None
+_LOGIN_STARTS: dict[tuple[str, str], asyncio.Task] = {}
 
 # Imported browser state is user-controlled input.  Keep the parser bounded so
 # a single request cannot create an unbounded number of browser entries or
@@ -94,12 +96,17 @@ def profile_storage_dir(profile_id: str, settings: Settings | None = None):
     return settings.profiles_dir / profile_id
 
 
-def create_or_get_profile(external_owner_id: str, settings: Settings | None = None) -> dict[str, str]:
+def create_or_get_profile(
+    external_owner_id: str,
+    settings: Settings | None = None,
+    *,
+    include_login_status: bool = False,
+) -> dict[str, object]:
     settings = settings or get_settings()
     validate_external_owner_id(external_owner_id)
     with get_connection(settings) as conn:
         profile = conn.execute(
-            "SELECT profile_id, external_owner_id FROM profiles WHERE external_owner_id=?",
+            "SELECT * FROM profiles WHERE external_owner_id=?",
             (external_owner_id,),
         ).fetchone()
         status = "exists"
@@ -116,7 +123,7 @@ def create_or_get_profile(external_owner_id: str, settings: Settings | None = No
                 (candidate_profile_id, external_owner_id, LoginStatus.UNKNOWN, now, now),
             )
             profile = conn.execute(
-                "SELECT profile_id, external_owner_id FROM profiles WHERE external_owner_id=?",
+                "SELECT * FROM profiles WHERE external_owner_id=?",
                 (external_owner_id,),
             ).fetchone()
             if profile is None:
@@ -124,11 +131,15 @@ def create_or_get_profile(external_owner_id: str, settings: Settings | None = No
             status = "created" if inserted.rowcount == 1 else "exists"
 
     profile_storage_dir(profile["profile_id"], settings).mkdir(parents=True, exist_ok=True)
-    return {
+    result: dict[str, object] = {
         "profile_id": profile["profile_id"],
         "external_owner_id": profile["external_owner_id"],
         "status": status,
     }
+    if include_login_status:
+        # Identity and profile come from the same fresh row, not a cross-request cache.
+        result["login"] = _login_status_payload(dict(profile))
+    return result
 
 
 def get_profile(profile_id: str, settings: Settings | None = None) -> dict[str, object]:
@@ -230,9 +241,12 @@ async def logout_profile(
     verify_profile_owner(profile_id, external_owner_id, settings)
 
     async with _login_runtime_lock():
+        starting = _LOGIN_STARTS.get((str(settings.db_path), profile_id))
         runtimes = [runtime for runtime in _LOGIN_RUNTIMES.values()
                     if runtime.profile_id == profile_id and runtime.settings.db_path == settings.db_path]
     tasks = [runtime.task for runtime in runtimes if runtime.task is not None and not runtime.task.done()]
+    if starting is not None and not starting.done():
+        tasks.append(starting)
     for task in tasks:
         if not task.cancelling():
             task.cancel()
@@ -286,10 +300,10 @@ async def start_login(
     external_owner_id: str,
     settings: Settings | None = None,
 ) -> dict[str, object]:
-    from .browser.context_manager import BrowserContextManager
-
     settings = settings or get_settings()
-    verify_profile_owner(profile_id, external_owner_id, settings)
+    profile = verify_profile_owner(profile_id, external_owner_id, settings)
+    if is_profile_logged_in(profile):
+        raise ProfileLockedError("当前账号已经登录；如需换号，请先确认退出。")
     async with _login_runtime_lock():
         for existing in _LOGIN_RUNTIMES.values():
             if (existing.profile_id == profile_id and existing.settings.db_path == settings.db_path
@@ -304,13 +318,35 @@ async def start_login(
                     "qr_image_sha256": _sha256_file(existing.qr_path),
                     "expires_in_seconds": max(1, int(existing.expires_at_monotonic - time.monotonic())),
                 }
+        key = (str(settings.db_path), profile_id)
+        task = _LOGIN_STARTS.get(key)
+        if task is None or task.done():
+            task = asyncio.create_task(_prepare_login(profile_id, external_owner_id, settings))
+            _LOGIN_STARTS[key] = task
+            def finished(done: asyncio.Task) -> None:
+                if _LOGIN_STARTS.get(key) is done:
+                    _LOGIN_STARTS.pop(key, None)
+                if not done.cancelled():
+                    done.exception()  # Observe failure even if the HTTP caller disconnected.
+            task.add_done_callback(finished)
+    # A disconnected/retried HTTP request does not strand or duplicate a browser.
+    # Explicit logout and kernel shutdown still cancel the shared preparation.
+    return await asyncio.shield(task)
+
+
+async def _prepare_login(profile_id: str, external_owner_id: str, settings: Settings) -> dict[str, object]:
+    from .browser.context_manager import BrowserContextManager
+    from playwright.async_api import Error as BrowserError
+
+    if is_profile_logged_in(verify_profile_owner(profile_id, external_owner_id, settings)):
+        raise ProfileLockedError("当前账号已经登录；如需换号，请先确认退出。")
     login_session_id = f"ls_{uuid.uuid4().hex[:16]}"
     lock_id = f"login_{login_session_id}"
     now = utc_now_iso()
     qr_dir = profile_storage_dir(profile_id, settings) / "login_sessions" / login_session_id
     qr_path = qr_dir / "qr.png"
     message = (
-        "Scan the QR image from the kernel profile login page. "
+        "Scan the Bilibili QR image and confirm on your phone. "
         "The kernel stores login state only inside the profile and returns no cookies."
     )
     lock_profile(profile_id, lock_id, settings)
@@ -331,24 +367,22 @@ async def start_login(
                     "UPDATE profiles SET login_status=?, updated_at=? WHERE profile_id=?",
                     (LoginStatus.PENDING, now, profile_id),
                 )
-            managed = await BrowserContextManager(settings).open_context(profile_id)
-            page = await managed.new_page()
-            await page.set_viewport_size({"width": 520, "height": 720})
-            await page.goto(
-                settings.bilibili_login_url,
-                wait_until="domcontentloaded",
-                timeout=int(settings.request_timeout_seconds * 1000),
-            )
-            await _capture_login_qr(page, qr_path)
+            managed = await BrowserContextManager(settings).open_request_context(profile_id)
+            challenge = await create_qr(managed.context, qr_path, settings)
+            # Start the displayed QR's lifetime when it is actually ready, not
+            # when Chromium preparation began. Never silently replace this PNG.
+            lifetime = min(settings.login_session_timeout_seconds, 180)
+            with get_connection(settings) as conn:
+                conn.execute("UPDATE login_sessions SET updated_at=? WHERE login_session_id=?", (utc_now_iso(), login_session_id))
             runtime = LoginRuntime(
                 login_session_id=login_session_id,
                 profile_id=profile_id,
                 lock_id=lock_id,
                 qr_path=qr_path,
                 managed=managed,
-                page=page,
+                challenge=challenge,
                 settings=settings,
-                expires_at_monotonic=time.monotonic() + settings.login_session_timeout_seconds,
+                expires_at_monotonic=time.monotonic() + lifetime,
             )
             async with _login_runtime_lock():
                 _LOGIN_RUNTIMES[login_session_id] = runtime
@@ -360,9 +394,9 @@ async def start_login(
                 "message": message,
                 "qr_image_url": _qr_image_url(profile_id, login_session_id, external_owner_id),
                 "qr_image_sha256": qr_sha256,
-                "expires_in_seconds": settings.login_session_timeout_seconds,
+                "expires_in_seconds": lifetime,
             }
-    except BaseException:
+    except BaseException as exc:
         if runtime is not None:
             async with _login_runtime_lock():
                 _LOGIN_RUNTIMES.pop(login_session_id, None)
@@ -390,6 +424,10 @@ async def start_login(
                 "QR login start failed; no cookies or QR token internals were returned",
                 settings,
             )
+        if isinstance(exc, TimeoutError):
+            raise LoginFlowError("LOGIN_PREPARATION_TIMEOUT", "二维码准备超时，本次会话已清理，请稍后重试。", 504) from exc
+        if isinstance(exc, BrowserError):
+            raise LoginFlowError("LOGIN_BROWSER_UNAVAILABLE", "登录组件暂时不可用，请稍后重试。", 503) from exc
         raise
 
 
@@ -405,13 +443,13 @@ def get_login_qr_image_path(
     validate_login_session_id(login_session_id)
     with get_connection(settings) as conn:
         row = conn.execute(
-            "SELECT profile_id, status, created_at FROM login_sessions WHERE login_session_id=?",
+            "SELECT profile_id, status, updated_at FROM login_sessions WHERE login_session_id=?",
             (login_session_id,),
         ).fetchone()
     if not row or row["profile_id"] != profile_id:
         raise ProfileNotFoundError("login session not found")
     if row["status"] != LoginStatus.PENDING or _login_session_expired(
-        row["created_at"], settings.login_session_timeout_seconds
+        row["updated_at"], min(settings.login_session_timeout_seconds, 180)
     ):
         raise FileNotFoundError("login QR is no longer available")
     path = profile_storage_dir(profile_id, settings) / "login_sessions" / login_session_id / "qr.png"
@@ -424,8 +462,18 @@ def get_login_qr_image_path(
     return resolved
 
 
-def get_login_status(profile_id: str, settings: Settings | None = None) -> dict[str, object]:
-    profile = get_profile(profile_id, settings)
+def get_login_status(
+    profile_id: str,
+    settings: Settings | None = None,
+    *,
+    external_owner_id: str | None = None,
+) -> dict[str, object]:
+    profile = (get_profile(profile_id, settings) if external_owner_id is None
+               else verify_profile_owner(profile_id, external_owner_id, settings))
+    return _login_status_payload(profile)
+
+
+def _login_status_payload(profile: dict[str, object]) -> dict[str, object]:
     return {
         "profile_id": profile["profile_id"],
         "logged_in": profile.get("login_status") == LoginStatus.LOGGED_IN,
@@ -481,6 +529,7 @@ async def shutdown_login_runtimes() -> None:
             for runtime in _LOGIN_RUNTIMES.values()
             if runtime.task is not None and not runtime.task.done()
         ]
+        tasks.extend(task for task in _LOGIN_STARTS.values() if not task.done())
     for task in tasks:
         task.cancel()
     if tasks:
@@ -526,10 +575,30 @@ def recover_stale_login_sessions(settings: Settings | None = None) -> dict[str, 
 
 
 async def _watch_login_session(runtime: LoginRuntime) -> None:
-    refresh_at = time.monotonic() + runtime.settings.login_qr_refresh_seconds
+    from playwright.async_api import Error as BrowserError
+
+    failures = 0
+    confirmed = False
     try:
         while time.monotonic() < runtime.expires_at_monotonic:
-            identity = await _verify_bilibili_identity(runtime.managed.context, runtime.settings)
+            try:
+                async with asyncio.timeout(max(0.01, min(15, runtime.expires_at_monotonic - time.monotonic()))):
+                    if not confirmed:
+                        state = await poll_qr(runtime.managed.context, runtime.challenge, runtime.settings)
+                        if state == "expired":
+                            break
+                        confirmed = state == "confirmed"
+                    identity = await _verify_bilibili_identity(runtime.managed.context, runtime.settings) if confirmed else {"logged_in": False}
+                    if confirmed and not identity["logged_in"]:
+                        raise LoginFlowError("LOGIN_IDENTITY_PENDING", "正在确认 B 站登录身份，请稍候。")
+                failures = 0
+            except (LoginFlowError, TimeoutError, BrowserError) as exc:
+                failures += 1
+                if (isinstance(exc, LoginFlowError) and not exc.retryable) or failures >= 4:
+                    raise
+                await asyncio.sleep(min(runtime.settings.login_poll_interval_seconds * (2 ** (failures - 1)),
+                                        max(0, runtime.expires_at_monotonic - time.monotonic())))
+                continue
             if bool(identity["logged_in"]):
                 update_login_metadata(
                     runtime.profile_id,
@@ -545,16 +614,8 @@ async def _watch_login_session(runtime: LoginRuntime) -> None:
                     runtime.settings,
                 )
                 return
-            now = time.monotonic()
-            if now >= refresh_at:
-                with contextlib.suppress(Exception):
-                    await runtime.page.reload(
-                        wait_until="domcontentloaded",
-                        timeout=int(runtime.settings.request_timeout_seconds * 1000),
-                    )
-                    await _capture_login_qr(runtime.page, runtime.qr_path)
-                refresh_at = now + runtime.settings.login_qr_refresh_seconds
-            await asyncio.sleep(runtime.settings.login_poll_interval_seconds)
+            await asyncio.sleep(min(runtime.settings.login_poll_interval_seconds,
+                                    max(0, runtime.expires_at_monotonic - time.monotonic())))
 
         update_login_metadata(
             runtime.profile_id,
@@ -594,53 +655,6 @@ async def _watch_login_session(runtime: LoginRuntime) -> None:
         release_profile_lock(runtime.profile_id, runtime.lock_id, runtime.settings)
         async with _login_runtime_lock():
             _LOGIN_RUNTIMES.pop(runtime.login_session_id, None)
-
-
-async def _capture_login_qr(page: Any, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # qrcode.js already renders a PNG next to its canvas. Reuse those exact
-    # pixels without forcing a costly page rasterization on a small VPS.
-    # Only accept a bounded, decoded square image paired with a QR canvas.
-    with contextlib.suppress(Exception):
-        async with asyncio.timeout(12):
-            handle = await page.wait_for_function("""() => {
-                const canvas = Array.from(document.querySelectorAll('canvas')).some(c => c.width >= 64 && c.width <= 1024 && c.width === c.height);
-                const images = Array.from(document.querySelectorAll('img[src^="data:image/png;base64,"]')).filter(i => i.src.length < 1048576);
-                return canvas && images.length === 1 ? images[0].src : null;
-            }""", timeout=10000, polling=100)
-            try:
-                bitmap = await handle.json_value()
-            finally:
-                await handle.dispose()
-        if isinstance(bitmap, str) and bitmap.startswith("data:image/png;base64,") and len(bitmap) < 1048576:
-            payload = base64.b64decode(bitmap.split(",", 1)[1], validate=True)
-            if payload.startswith(b"\x89PNG\r\n\x1a\n") and len(payload) >= 24:
-                width, height = int.from_bytes(payload[16:20], "big"), int.from_bytes(payload[20:24], "big")
-                if width != height or not 64 <= width <= 1024:
-                    raise ValueError("Unexpected QR bitmap dimensions")
-                path.write_bytes(payload)
-                return
-    selectors = [
-        ".login-scan-box",
-        ".qrcode-box",
-        ".qr-code",
-        "[class*='qrcode']",
-        "[class*='qr-code']",
-        "canvas",
-    ]
-    # One shared wait instead of six sequential 3-second waits on pages whose
-    # QR class differs. Keep the original selector priority and page fallback.
-    with contextlib.suppress(Exception):
-        await page.locator(", ".join(f"{selector}:visible" for selector in selectors)).first.wait_for(state="visible", timeout=3000)
-    for selector in selectors:
-        with contextlib.suppress(Exception):
-            locator = page.locator(selector).first
-            if not await locator.is_visible():
-                continue
-            await locator.screenshot(path=str(path))
-            if path.exists() and path.stat().st_size > 0:
-                return
-    await page.screenshot(path=str(path), full_page=True)
 
 
 def _update_login_session(
@@ -1083,9 +1097,10 @@ async def _verify_bilibili_identity(context: Any, settings: Settings) -> dict[st
         },
         timeout=int(settings.request_timeout_seconds * 1000),
     )
-    if response.status != 200:
-        return {"logged_in": False, "bili_uid": None, "nickname": None}
-    payload = await response.json()
+    async with managed_response(response):
+        if response.status != 200:
+            return {"logged_in": False, "bili_uid": None, "nickname": None}
+        payload = await response.json()
     data = payload.get("data") or {}
     logged_in = bool(data.get("isLogin"))
     return {

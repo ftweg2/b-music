@@ -35,12 +35,27 @@ Response:
 }
 ```
 
+The optional boolean request field `include_login_status: true` adds `login` to
+this response, using the same fields (including null identity fields) as the
+login-status endpoint. Profile ownership and status are resolved from one fresh
+database row. Requests without this field retain the original response shape.
+The App uses this combined read and falls back to the old two-request flow when
+an older kernel omits `login`; identity is never cached across incoming requests.
+
 ```http
 POST /v1/profiles/{profile_id}/login/start
 GET /v1/profiles/{profile_id}/login/status?external_owner_id=user_or_team_123
 ```
 
-Login start opens the normal Bilibili login page inside the kernel-owned profile and returns a QR screenshot URL. It must not return cookies, QR token internals, storage state, localStorage, sessionStorage, browser profile paths, or sensitive headers.
+Login start uses the normal first-party Bilibili web QR endpoints inside the kernel-owned profile's request context and returns a QR PNG URL. It does not load or screenshot the full login page. It must not return cookies, QR token internals, storage state, localStorage, sessionStorage, browser profile paths, or sensitive headers.
+
+HTTP-only login/search now use an isolated Playwright request runtime without
+launching Chrome. When an extraction already owns the browser, HTTP readers use
+that browser's request context instead. One kernel profile has only one active
+cookie jar; transitions drain existing readers. A private owner-only journal in
+the profile directory supports cookie persistence and crash recovery, and is
+never an API artifact. Existing Chromium profiles bootstrap once; localStorage
+and other browser-origin data remain in the existing browser profile.
 
 Request:
 
@@ -56,20 +71,20 @@ Response:
 {
   "login_session_id": "ls_xxx",
   "status": "pending",
-  "message": "Scan the QR image from the kernel profile login page...",
+  "message": "Scan the Bilibili QR image and confirm on your phone...",
   "qr_image_url": "/v1/profiles/p_xxx/login/ls_xxx/qr.png?external_owner_id=user_or_team_123",
   "qr_image_sha256": "abc123...",
   "expires_in_seconds": 180
 }
 ```
 
-The QR image is a screenshot artifact from the profile-owned login page. Treat it as sensitive UI material: display it only to the profile owner and do not log it. The kernel keeps the browser context open while the QR login is pending, polls sanitized identity via normal Bilibili identity checks, then stores only `bili_uid`, `nickname`, login status, and verification time.
+The QR image is a PNG encoded from Bilibili's first-party challenge. Treat it as sensitive UI material: display it only to the profile owner and do not log it. The kernel keeps the profile context open while QR login is pending, polls the same challenge without replacing the PNG, and separately verifies identity before recording `bili_uid`, `nickname`, login status, and verification time. Cookies remain solely in that kernel browser profile. Concurrent starts reuse one preparation; the returned lifetime begins at readiness and is at most 180 seconds. Preparation/upstream timeouts return 504 with a stable `X-Error-Code` and `Retry-After`; temporary connection failures return 502/503. Restrictions are not bypassed. See [reliability and failure handling](LOGIN_RELIABILITY.md).
 
 ```http
 GET /v1/profiles/{profile_id}/login/{login_session_id}/qr.png?external_owner_id=user_or_team_123
 ```
 
-Returns only the QR screenshot PNG for that owner/profile/session. It does not return QR token internals.
+Returns only the QR PNG for that owner/profile/session. It does not return QR token internals.
 
 ```http
 GET /v1/profiles/{profile_id}/login/status?external_owner_id=user_or_team_123

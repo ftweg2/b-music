@@ -15,7 +15,7 @@ const textOrNull = nullable(str());
 const stamp = str({ format: "date-time" });
 const strategy = str({ enum: ["api_dash", "browser_network", "mse_sourcebuffer"] });
 const prepareProperties = {
-  candidateId: id, bvid: bv, strategyMode: str({ enum: ["auto", "force"], default: "auto" }),
+  candidateId: id, bvid: bv, strategyMode: str({ enum: ["auto", "force"], description: "Omitting all strategy parameters selects force + api_dash. Explicit strategyOrder without a mode selects auto." }),
   strategy, strategyOrder: { ...array(strategy, 3), minItems: 1 },
   strategy_mode: str({ enum: ["auto", "force"], deprecated: true }),
   strategy_order: { ...array(strategy, 3), minItems: 1, deprecated: true },
