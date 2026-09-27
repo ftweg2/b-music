@@ -24,6 +24,10 @@ All notable changes to B-Music are documented here. The project follows [Semanti
 - Douyin defaults for a 0.5-core container: `DOUYIN_DETAIL_TIMEOUT_SECONDS` 45, `DOUYIN_DOWNLOAD_CONCURRENCY` 2; the App waits up to 90 seconds for a Douyin lookup.
 - Shared-host overlay (`deploy/compose.antigravity-safe.yml`): no fixed CPU cap, only a low CPU weight (128), and a 256 MiB App. `deploy/priority-guard.py` moves the kernel's RAM ceiling between 320 and 768 MiB with host headroom, always leaving 300 MiB free. The kernel's page cache is not counted, because host available memory already includes it. It lowers the ceiling on a 32 MiB change and raises it only on a 96 MiB change. After a protective stop it restarts B-Music once Antigravity has been healthy with at least 450 MiB free for five minutes. Three automatic restarts within six hours latch the pause for the operator.
 
+### Security
+
+- Next.js 16.3.0 → 16.3.6 for the Image Optimization AVIF remote code execution advisory (GHSA-2xp9-vwfh-vxw4). The same release also fixes the Windows-hosted server advisory (GHSA-p293-qw3h-jr36). With it come sharp 0.35.4 (libheif, GHSA-rgj7-g3m4-5g8c) and baseline-browser-mapping 2.11.26 (GHSA-w5vr-8v7q-w6rv).
+
 ### Fixed
 
 - Closing a Douyin lookup browser after an unavailable or timed-out answer no longer records a spurious browser crash.
