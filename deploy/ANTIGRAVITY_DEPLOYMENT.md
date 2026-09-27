@@ -1,7 +1,7 @@
 # Antigravity-priority deployment — 2026-09-06, updated 2026-09-27
 
 The live site is https://bmusic.ftwegc.com on `47.254.129.176`, with App
-`20260927-douyin-r6` and kernel `20260927-douyin-r7`. The App and kernel were built on the local Windows Docker
+`20260927-douyin-r8` and kernel `20260927-douyin-r7`. The App and kernel were built on the local Windows Docker
 Linux engine. The VPS only received and loaded prebuilt images; it performed no
 application build or dependency installation. Source and data archives were
 also verified after upload.
@@ -249,6 +249,46 @@ The record is `/opt/bmusic/private/douyin-r7-deployment.json`. The sources are
 `/opt/bmusic/releases/20260927-douyin-r6/source.tar.gz` and
 `/opt/bmusic/releases/20260927-douyin-r7/source.tar.gz`. The previous images,
 `bmusic-app:20260906-heart-r5` and `bmusic-kernel:20260906-dash-r3`, remain on the
+VPS for rollback.
+
+## Next.js security update — 2026-09-27
+
+After the Douyin release, `npm audit` reported new advisories against the App's
+production dependencies:
+
+- Next.js 16.3.0 has a critical remote code execution in the Image Optimization
+  API with AVIF files (GHSA-2xp9-vwfh-vxw4), plus an advisory for Windows-hosted
+  servers (GHSA-p293-qw3h-jr36).
+- sharp 0.35.3 has libheif vulnerabilities (GHSA-rgj7-g3m4-5g8c).
+
+The live `/_next/image` endpoint was reachable and rejected remote URLs. The App
+configures no remote image patterns, so exploitation was unlikely. It was
+patched anyway.
+
+App `20260927-douyin-r8` uses Next.js 16.3.6, sharp 0.35.4 and
+baseline-browser-mapping 2.11.26; the App code is unchanged. Local validation:
+
+- `npm audit --omit=dev` reports no vulnerabilities.
+- `npm test` passed 122 tests, and typecheck and the production build passed.
+- Compatibility acceptance passed 11 checks, 1,503 requests and all 41 operations
+  against kernel `r7`. Ranges and account acceptance passed 3 checks with 248
+  requests.
+- The image no longer bundles the musl (Alpine) sharp variants, which the Debian
+  runtime does not use.
+
+The image transferred as a 12.2 MB delta over `r6`, and its ID is
+`sha256:23a748c0927f4d2c5104a43ae8845c11770c86ee0cb410487c758205d52ff463`.
+`deploy/private/deploy_app_r8.py` first did a dry run: the only Compose change was
+the App image, and no job was active. At 07:50 UTC it replaced only the App,
+after backing up `.env` and the App database to
+`/opt/bmusic/private/before-app-r8-20260927T075003Z`. The App was healthy again
+within about 6 seconds.
+
+The App's limits were unchanged, and Next reported 16.3.6. The kernel,
+Antigravity and Caddy were verified unchanged. Public HTTPS, API revision 1.3.0,
+the Bilibili login, the cached Douyin cover and OpenAPI all passed. The record is
+`/opt/bmusic/private/app-r8-deployment.json`. The source is
+`/opt/bmusic/releases/20260927-douyin-r8/source.tar.gz`. App `r6` remains on the
 VPS for rollback.
 
 ## Initial deployment verification and data

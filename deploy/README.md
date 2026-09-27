@@ -2,7 +2,7 @@
 
 Production uses prebuilt Linux images, an isolated Compose project named `bmusic`, `/opt/bmusic` data/configuration, loopback ports 13100 (App) and 18100 (kernel), and its own `bmusic.ftwegc.com` Nginx virtual host. No existing site's files are replaced. The VPS does not run a Next development server or build the application.
 
-The current deployment uses App `20260927-douyin-r6` and kernel `20260927-douyin-r7` on the shared Antigravity host
+The current deployment uses App `20260927-douyin-r8` and kernel `20260927-douyin-r7` on the shared Antigravity host
 `47.254.129.176`, serving `https://bmusic.ftwegc.com` through the existing Caddy.
 Both Linux images were built and validated locally before upload. Antigravity has
 priority, but B-Music is not boxed in. There is no fixed CPU cap; a low CPU weight
