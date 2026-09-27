@@ -1,0 +1,20 @@
+[Unit]
+Description=Pause B-Music under pressure to protect Antigravity Tools
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/bmusic/priority-guard.py
+User=root
+Environment=PYTHONDONTWRITEBYTECODE=1
+Nice=15
+CPUWeight=10
+CPUQuota=15%
+MemoryMax=64M
+OOMScoreAdjust=500
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/bmusic/private
+TimeoutStartSec=45

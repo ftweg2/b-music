@@ -29,7 +29,7 @@ export class KernelRequestError extends Error {
   readonly status: number | null;
   readonly retryable: boolean;
 
-  constructor(message: string, status: number | null, retryable: boolean, public readonly submissionRejected = false, public readonly retryAfterSeconds?: number) {
+  constructor(message: string, status: number | null, retryable: boolean, public readonly submissionRejected = false, public readonly retryAfterSeconds?: number, public readonly code?: string) {
     super(message);
     this.name = "KernelRequestError";
     this.status = status;
@@ -52,14 +52,33 @@ export async function getKernelHealth(): Promise<KernelHealth> {
   return response.json() as Promise<KernelHealth>;
 }
 
+export type KernelStrategyName = "api_dash" | "browser_network" | "mse_sourcebuffer" | "douyin_music";
+export type KernelOutput = "raw" | "m4a" | "wav";
+
+export type KernelDouyinItem = {
+  provider: "kernel_douyin";
+  profile_id: string;
+  aweme_id: string;
+  source_url: string;
+  title: string;
+  creator_name: string | null;
+  duration_seconds: number | null;
+  music_title: string | null;
+  music_author: string | null;
+  has_music_audio: boolean;
+  has_video_audio: boolean;
+  has_cover?: boolean;
+};
+
 export async function submitKernelAudioJob(input: {
   jobId: string;
   externalOwnerId: string;
   profileId: string;
   url: string;
   strategyMode: "auto" | "force";
-  strategy?: "api_dash" | "browser_network" | "mse_sourcebuffer";
-  strategyOrder?: Array<"api_dash" | "browser_network" | "mse_sourcebuffer">;
+  strategy?: KernelStrategyName;
+  strategyOrder?: KernelStrategyName[];
+  outputs?: KernelOutput[];
 }): Promise<{ job_id: string; status: string; stage: string }> {
   return readKernelJson("/v1/jobs", {
     method: "POST",
@@ -71,9 +90,36 @@ export async function submitKernelAudioJob(input: {
       strategy_mode: input.strategyMode,
       strategy: input.strategyMode === "force" ? input.strategy : undefined,
       strategy_order: input.strategyMode === "auto" ? input.strategyOrder : undefined,
-      outputs: ["m4a"]
+      outputs: input.outputs ?? ["m4a"]
     })
   });
+}
+
+/** Ask the kernel for public metadata of one user-supplied Douyin link. */
+export async function resolveKernelDouyin(input: {
+  externalOwnerId: string;
+  profileId: string;
+  url: string;
+}): Promise<KernelDouyinItem> {
+  return readKernelJson<KernelDouyinItem>("/v1/douyin/resolve", {
+    method: "POST",
+    // Opening the public page takes several seconds (longer on small machines, and
+    // lookups queue for one browser); allow well beyond a normal kernel call.
+    signal: AbortSignal.timeout(Math.max(90_000, kernelRequestTimeoutMs())),
+    body: JSON.stringify({
+      external_owner_id: input.externalOwnerId,
+      profile_id: input.profileId,
+      url: input.url
+    })
+  });
+}
+
+/** A Douyin cover the kernel cached while resolving the link (never a Douyin URL). */
+export async function fetchKernelDouyinCover(awemeId: string, externalOwnerId: string): Promise<Response> {
+  return fetch(
+    `${kernelBaseUrl()}/v1/douyin/covers/${encodeURIComponent(awemeId)}?external_owner_id=${encodeURIComponent(externalOwnerId)}`,
+    { cache: "no-store", redirect: "error", signal: AbortSignal.timeout(8_000) }
+  );
 }
 
 export async function getKernelJob(jobId: string, externalOwnerId: string): Promise<KernelJobStatus> {
@@ -108,7 +154,10 @@ export async function readKernelJson<T>(path: string, init?: RequestInit): Promi
     throw new KernelRequestError(
       `暂时无法连接音频内核：${error instanceof Error ? error.message : "network error"}`,
       null,
-      true
+      true,
+      false,
+      undefined,
+      error instanceof Error && error.name === "TimeoutError" ? "KERNEL_REQUEST_TIMEOUT" : undefined
     );
   }
   const payload = (await response.json().catch(() => ({}))) as { detail?: string; error?: string };
@@ -116,9 +165,10 @@ export async function readKernelJson<T>(path: string, init?: RequestInit): Promi
     throw new KernelRequestError(
       payload.detail || payload.error || `内核请求失败：HTTP ${response.status}`,
       response.status,
-      response.status === 408 || response.status === 429 || response.status >= 500 || Number(response.headers.get("retry-after")) > 0,
+      response.headers.get("x-error-retryable") === "false" ? false : response.status === 408 || response.status === 429 || response.status >= 500 || Number(response.headers.get("retry-after")) > 0,
       response.headers.get("x-kernel-job-accepted") === "false",
-      Number(response.headers.get("retry-after")) > 0 ? Number(response.headers.get("retry-after")) : undefined
+      Number(response.headers.get("retry-after")) > 0 ? Number(response.headers.get("retry-after")) : undefined,
+      /^[A-Z][A-Z0-9_]{0,63}$/.test(response.headers.get("x-error-code") || "") ? response.headers.get("x-error-code")! : undefined
     );
   }
   return payload as T;

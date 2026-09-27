@@ -29,14 +29,15 @@ from .profile_manager import (
 from .security import (
     sanitize_dict,
     sanitize_text,
-    validate_bilibili_video_ref,
     validate_external_owner_id,
     validate_job_id,
     validate_profile_id,
 )
+from .sources import PROFILE_BOUND_SOURCES, source_for_url, validate_video_ref
 from .strategies.api_dash import ApiDashStrategy
 from .strategies.base import ExtractionStrategy, StrategyCancelled, StrategyContext, StrategyResult
 from .strategies.browser_network import BrowserNetworkStrategy
+from .strategies.douyin_music import DouyinMusicStrategy
 from .strategies.mse_sourcebuffer import MseSourceBufferStrategy
 from .strategy_selector import select_strategy_order
 
@@ -65,6 +66,7 @@ def strategy_registry() -> dict[str, ExtractionStrategy]:
         StrategyName.API_DASH: ApiDashStrategy(),
         StrategyName.BROWSER_NETWORK: BrowserNetworkStrategy(),
         StrategyName.MSE_SOURCEBUFFER: MseSourceBufferStrategy(),
+        StrategyName.DOUYIN_MUSIC: DouyinMusicStrategy(),
     }
 
 
@@ -79,11 +81,16 @@ def create_job(request: object, settings: Settings | None = None) -> dict[str, o
     validate_job_id(request.job_id)
     validate_external_owner_id(request.external_owner_id)
     validate_profile_id(request.profile_id)
-    bvid = validate_bilibili_video_ref(request.url)
-    canonical_url = f"https://www.bilibili.com/video/{bvid}"
+    video_ref = validate_video_ref(request.url)
+    canonical_url = video_ref.canonical_url
     if request.strategy_mode == "force" and not request.strategy:
         raise ValueError("force mode requires strategy")
-    select_strategy_order(request.strategy_mode, request.strategy, request.strategy_order)
+    select_strategy_order(
+        request.strategy_mode,
+        request.strategy,
+        request.strategy_order,
+        source=video_ref.source,
+    )
     now = utc_now_iso()
     outputs = list(dict.fromkeys(request.outputs))
     if not outputs:
@@ -116,16 +123,17 @@ def create_job(request: object, settings: Settings | None = None) -> dict[str, o
         if profile["external_owner_id"] != request.external_owner_id:
             raise ProfileOwnershipError("profile does not belong to external_owner_id")
 
-        lock = conn.execute(
-            """
-            UPDATE profiles
-            SET active_job_id=?, updated_at=?
-            WHERE profile_id=? AND (active_job_id IS NULL OR active_job_id='')
-            """,
-            (request.job_id, now, request.profile_id),
-        )
-        if lock.rowcount != 1:
-            raise ProfileLockedError("profile already has an active job")
+        if video_ref.source in PROFILE_BOUND_SOURCES:
+            lock = conn.execute(
+                """
+                UPDATE profiles
+                SET active_job_id=?, updated_at=?
+                WHERE profile_id=? AND (active_job_id IS NULL OR active_job_id='')
+                """,
+                (request.job_id, now, request.profile_id),
+            )
+            if lock.rowcount != 1:
+                raise ProfileLockedError("profile already has an active job")
 
         conn.execute(
             """
@@ -237,6 +245,7 @@ async def run_job(job_id_value: str, settings: Settings | None = None) -> None:
                 available_strategies=list(registry.keys()),
                 logged_in=is_profile_logged_in(profile),
                 context_hints={},
+                source=source_for_url(str(job["url"])),
             )
             context = StrategyContext(
                 job_id=job_id_value,

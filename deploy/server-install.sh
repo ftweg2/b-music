@@ -24,14 +24,6 @@ install -m 0644 "$stage/managed-marker" "$root/.managed-by-bmusic"
 install -d -m 0755 /var/lib/bmusic/acme
 install -m 0644 "$stage/compose.yml" "$root/compose.yml"
 install -m 0600 "$stage/release.env" "$root/.env"
-install -m 0600 "$stage/password" "$root/private/password"
-if ! command -v htpasswd >/dev/null; then
-    apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends apache2-utils
-fi
-htpasswd -Bci -C 6 /etc/nginx/bmusic.htpasswd bmusic < "$root/private/password"
-chown root:www-data /etc/nginx/bmusic.htpasswd
-chmod 0640 /etc/nginx/bmusic.htpasswd
 if [[ ! -e /etc/letsencrypt/live/bmusic.ftwegc.com/fullchain.pem ]]; then
     install -m 0644 "$stage/nginx-http.conf" /etc/nginx/sites-available/bmusic.conf
     if [[ ! -e /etc/nginx/sites-enabled/bmusic.conf ]]; then ln -s /etc/nginx/sites-available/bmusic.conf /etc/nginx/sites-enabled/bmusic.conf; fi

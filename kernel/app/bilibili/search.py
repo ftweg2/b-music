@@ -7,6 +7,7 @@ import uuid
 from typing import Any
 
 from app.browser.context_manager import BrowserContextManager
+from app.browser.responses import dispose_response
 from app.config import Settings, get_settings
 from app.models import LoginStatus
 from app.profile_manager import (
@@ -54,10 +55,11 @@ async def search_videos_with_profile(
 
     lease_id = acquire_profile_reader(profile_id, external_owner_id, settings)
     managed = None
+    response = None
     try:
         async with asyncio.timeout(min(30.0, max(1.0, timeout_seconds))):
             profile = get_profile(profile_id, settings)
-            managed = await BrowserContextManager(settings).open_context(profile_id)
+            managed = await BrowserContextManager(settings).open_request_context(profile_id)
             safe_limit = min(max(limit, 1), 20)
             safe_page = min(max(page, 1), 10)
             response = await managed.context.request.get(
@@ -81,12 +83,15 @@ async def search_videos_with_profile(
         raise KernelSearchError("search timed out; retry or use public search") from exc
     finally:
         try:
-            if managed is not None:
-                try:
-                    async with asyncio.timeout(3):
-                        await managed.close()
-                except TimeoutError:
-                    pass
+            try:
+                await dispose_response(response)
+            finally:
+                if managed is not None:
+                    try:
+                        async with asyncio.timeout(3):
+                            await managed.close()
+                    except TimeoutError:
+                        pass
         finally:
             release_profile_reader(profile_id, lease_id, settings)
 

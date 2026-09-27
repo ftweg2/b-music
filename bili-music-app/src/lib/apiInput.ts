@@ -1,5 +1,6 @@
 import { ApiError, optionalString, positiveId } from "./api";
 import type { CreatePreferredCreatorInput } from "./models";
+import { isVideoRef } from "./videoRef";
 
 export function booleanInput(value: unknown, fallback: boolean, name: string): boolean {
   if (value === undefined || value === null) return fallback;
@@ -16,7 +17,7 @@ export function integerInput(value: unknown, fallback: number, min: number, max:
 export function candidateReference(body: Record<string, unknown>): { candidateId?: number; bvid?: string } {
   const candidateId = body.candidateId === undefined || body.candidateId === null ? undefined : positiveId(body.candidateId, "candidateId");
   const value = body.bvid;
-  if (value !== undefined && value !== null && (typeof value !== "string" || !/^BV[0-9A-Za-z]{10}$/.test(value))) throw new ApiError(400, "INVALID_BVID", "bvid 必须是有效的 BV 号");
+  if (value !== undefined && value !== null && !isVideoRef(value)) throw new ApiError(400, "INVALID_BVID", "bvid 必须是有效的 BV 号或抖音作品编号（DY 开头）");
   const bvid = typeof value === "string" ? value : undefined;
   if (!candidateId && !bvid) throw new ApiError(400, "CANDIDATE_REQUIRED", "请提供 candidateId 或 bvid");
   return { candidateId, bvid };
@@ -30,6 +31,10 @@ export function strategyInput(body: Record<string, unknown>): {
   const value = body.strategy;
   if (value !== undefined && (typeof value !== "string" || !(strategies as readonly string[]).includes(value))) throw new ApiError(400, "INVALID_STRATEGY", "不支持的音频处理策略");
   const strategy = value as (typeof strategies)[number] | undefined;
+  if (body.strategyMode == null && body.strategy_mode == null && strategy === undefined &&
+      body.strategyOrder == null && body.strategy_order == null) {
+    return { strategyMode: "force", strategy: "api_dash" };
+  }
   const mode = body.strategyMode ?? body.strategy_mode ?? (strategy ? "force" : "auto");
   if (mode !== "auto" && mode !== "force") throw new ApiError(400, "INVALID_STRATEGY_MODE", "strategyMode 必须是 auto 或 force");
   const order = body.strategyOrder ?? body.strategy_order;

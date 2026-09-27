@@ -98,3 +98,7 @@ tests/performance-reports/
 *.key
 *.pem
 *.tar.gz
+
+# Kernel-only cookie handoff journal (including custom profile directories)
+http-session.json
+.http-session-*

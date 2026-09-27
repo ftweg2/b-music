@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+from collections.abc import Iterator
 
 from app.config import get_settings
 
@@ -29,6 +31,23 @@ from app.security import sanitize_text
 
 router = APIRouter(prefix="/v1/jobs", tags=["jobs"])
 _job_tasks: set[asyncio.Task[None]] = set()
+# Douyin lookups start a browser just like browser-backed jobs. They share the
+# MAX_ACTIVE_JOBS budget, so a small machine never runs more heavy work at once.
+_active_lookups = 0
+
+
+def heavy_work_in_progress() -> int:
+    return len(_job_tasks) + _active_lookups
+
+
+@contextlib.contextmanager
+def lookup_admission() -> Iterator[None]:
+    global _active_lookups
+    _active_lookups += 1
+    try:
+        yield
+    finally:
+        _active_lookups -= 1
 
 
 def _consume_task_result(task: asyncio.Task[None]) -> None:
@@ -54,7 +73,7 @@ async def shutdown_job_tasks() -> None:
 @router.post("", response_model=JobCreateResponse)
 async def submit_job(request: JobCreateRequest) -> dict[str, object]:
     try:
-        if len(_job_tasks) >= get_settings().max_active_jobs:
+        if heavy_work_in_progress() >= get_settings().max_active_jobs:
             try:
                 verify_job_owner(request.job_id, request.external_owner_id)
             except JobNotFoundError:

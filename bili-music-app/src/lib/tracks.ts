@@ -14,12 +14,14 @@ import {
   listKernelArtifacts,
   submitKernelAudioJob,
   type KernelArtifact,
-  type KernelJobStatus
+  type KernelJobStatus,
+  type KernelStrategyName
 } from "./kernelClient";
 import type { Track } from "./models";
-import { sanitizeBvid, sanitizeText } from "./sanitize";
+import { sanitizeText } from "./sanitize";
+import { sanitizeVideoRef, videoSource } from "./videoRef";
 
-type StrategyName = "api_dash" | "browser_network" | "mse_sourcebuffer";
+type StrategyName = KernelStrategyName;
 type StrategyMode = "auto" | "force";
 
 export type PrepareTrackInput = {
@@ -95,15 +97,29 @@ export async function prepareTrack(input: PrepareTrackInput): Promise<Track> {
   }
   track = claimed;
   try {
-    await submitKernelAudioJob({
-      jobId,
-      externalOwnerId,
-      profileId,
-      url: candidate.sourceUrl,
-      strategyMode,
-      strategy: input.strategy,
-      strategyOrder: input.strategyOrder
-    });
+    await submitKernelAudioJob(
+      videoSource(candidate.bvid) === "douyin"
+        ? {
+            // Douyin has a single kernel strategy. Its source audio is usually MP3,
+            // which the kernel's m4a remux cannot hold, so keep the raw file.
+            jobId,
+            externalOwnerId,
+            profileId,
+            url: candidate.sourceUrl,
+            strategyMode: "force",
+            strategy: "douyin_music",
+            outputs: ["raw"]
+          }
+        : {
+            jobId,
+            externalOwnerId,
+            profileId,
+            url: candidate.sourceUrl,
+            strategyMode,
+            strategy: input.strategy,
+            strategyOrder: input.strategyOrder
+          }
+    );
     return track;
   } catch (error) {
     const definitiveRejection = error instanceof KernelRequestError && (!error.retryable || error.submissionRejected);
@@ -145,7 +161,7 @@ function resolvePlayableCandidate(
       return candidate;
     }
   }
-  const bvid = sanitizeBvid(input.bvid);
+  const bvid = sanitizeVideoRef(input.bvid);
   if (!bvid) {
     return null;
   }
@@ -246,7 +262,7 @@ async function syncSucceededJob(track: Track, job: KernelJobStatus): Promise<Tra
   if (!artifact) {
     return updateTrack(track.id, {
       status: "failed",
-      failureReason: "kernel job succeeded but audio.m4a artifact was not found",
+      failureReason: "kernel job succeeded but no playable audio artifact was found",
       expiresAt: null
     }, track.externalOwnerId);
   }

@@ -7,18 +7,20 @@ from pydantic import BaseModel, Field
 from .models import OutputType, StrategyMode, StrategyName
 
 
-StrategyLiteral = Literal["api_dash", "browser_network", "mse_sourcebuffer"]
+StrategyLiteral = Literal["api_dash", "browser_network", "mse_sourcebuffer", "douyin_music"]
 OutputLiteral = Literal["raw", "m4a", "wav"]
 
 
 class ProfileCreateRequest(BaseModel):
     external_owner_id: str = Field(min_length=1, max_length=128)
+    include_login_status: bool = False
 
 
 class ProfileCreateResponse(BaseModel):
     profile_id: str
     external_owner_id: str
     status: Literal["created", "exists"]
+    login: LoginStatusResponse | None = None
 
 
 class LoginStartResponse(BaseModel):
@@ -169,9 +171,33 @@ class VideoResolveResponse(VideoSearchResult):
     pages: list[dict[str, object]] = Field(default_factory=list)
 
 
+class DouyinResolveRequest(BaseModel):
+    external_owner_id: str = Field(min_length=1, max_length=128)
+    profile_id: str
+    url: str = Field(min_length=1, max_length=512)
+
+
+class DouyinResolveResponse(BaseModel):
+    provider: Literal["kernel_douyin"]
+    profile_id: str
+    aweme_id: str
+    source_url: str
+    title: str
+    creator_name: str | None = None
+    duration_seconds: int | None = None
+    music_title: str | None = None
+    music_author: str | None = None
+    has_music_audio: bool
+    has_video_audio: bool
+    # True when the kernel cached the cover; read it from GET /v1/douyin/covers/{aweme_id}.
+    has_cover: bool = False
+
+
 class StrategyListResponse(BaseModel):
     strategies: list[str] = Field(default_factory=lambda: list(StrategyName.ALL))
-    default_order: list[str] = Field(default_factory=lambda: list(StrategyName.ALL))
+    # Bilibili order, kept for clients that predate per-source strategies.
+    default_order: list[str] = Field(default_factory=list)
+    source_orders: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class StrategyMetric(BaseModel):

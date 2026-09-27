@@ -29,6 +29,7 @@ jobs:
           cache-dependency-path: bili-music-app/package-lock.json
       - run: npm ci
       - run: npm test
+      - run: node --test ../tests/mse-hook.test.mjs
       - run: npm run typecheck
       - run: npm run build
 
@@ -63,6 +64,21 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build kernel image
         run: docker build --tag b-music-kernel:ci kernel
+      - name: Verify AAC/MSE bytes and runtime hot paths in the production image
+        run: >-
+          docker run --rm --network none --init --memory 512m --memory-swap 512m --cpus 1
+          --mount type=bind,source=${{ github.workspace }}/tests/runtime-benchmark.py,target=/qa/runtime-benchmark.py,readonly
+          -e PYTHONPATH=/app
+          -e PLAYWRIGHT_EXECUTABLE_PATH=/opt/chrome-headless-shell-linux64/chrome-headless-shell
+          b-music-kernel:ci python /qa/runtime-benchmark.py
+      # HTTP-only requests must preserve cookies across browser handoff/recovery.
+      - name: Verify isolated HTTP/browser session handoff
+        run: >-
+          docker run --rm --network none --init --memory 512m --memory-swap 512m --cpus 1
+          --mount type=bind,source=${{ github.workspace }}/tests/browser-session-check.py,target=/qa/browser-session-check.py,readonly
+          -e PYTHONPATH=/app
+          -e PLAYWRIGHT_EXECUTABLE_PATH=/opt/chrome-headless-shell-linux64/chrome-headless-shell
+          b-music-kernel:ci python /qa/browser-session-check.py
       - name: Start kernel container
         run: docker run --detach --rm --name b-music-kernel-ci --publish 127.0.0.1:8000:8000 b-music-kernel:ci
       - name: Wait for health

@@ -93,7 +93,7 @@ def test_first_unvisited_search_page_succeeds_during_media_processing(tmp_path, 
         async def close(self): pass
     class Manager:
         def __init__(self, _settings): pass
-        async def open_context(self, _profile): return Managed()
+        async def open_request_context(self, _profile): return Managed()
     monkeypatch.setattr("app.bilibili.search.BrowserContextManager", Manager)
     result = asyncio.run(search_videos_with_profile(external_owner_id="owner", profile_id=profile,
                                                    keyword="song", limit=20, page=3, settings=settings))

@@ -1,0 +1,5 @@
+# Retain the QA preload while testing exactly the reduced production heap.
+services:
+  app:
+    environment:
+      NODE_OPTIONS: --max-old-space-size=96 --import /qa/container-preload.mjs

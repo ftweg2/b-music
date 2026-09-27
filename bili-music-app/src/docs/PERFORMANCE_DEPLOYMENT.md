@@ -2,7 +2,7 @@
 
 目标：不改变现有音乐、账号、歌单、播放区间和手机 API 行为，减少重复计算与数据库开销；构建可复现的生产镜像，部署到 bmusic.ftwegc.com，保持同机其他项目不变，并推送 GitHub。
 
-## 验收清单
+## 初次部署验收清单（入口认证现状见下方更新）
 
 - [x] 优化前后基准及输出一致性证据。
 - [x] 全部单元/集成、API、播放区间回归通过。
@@ -29,7 +29,7 @@ Windows Node v24.19.0，独立临时 SQLite 中 20,000 条元数据，预热 25 
 
 脚本与部署方式见 [部署说明](../../../deploy/README.md)。详细原始报告和性能样本保留在本机的 tests/mobile-api/reports 与 tests/performance-reports，默认不上传 GitHub，避免暴露个人运行信息。
 
-## VPS 验收（2026-09-05）
+## 初次 VPS 验收（2026-09-05，历史记录）
 
 - 域名：`https://bmusic.ftwegc.com`。未认证请求为 401；正确认证后 HTML、静态资源、健康、能力、OpenAPI、音乐库读取均为 200。外站 Origin 修改请求被拒绝，本域 HTTPS Origin 正常到达参数校验。
 - Certbot webroot 证书签发成功，到期日 2026-12-04，已安装仅针对本域的续期后 Nginx 校验/重载钩子。
@@ -40,6 +40,35 @@ Windows Node v24.19.0，独立临时 SQLite 中 20,000 条元数据，预热 25 
 - B 站新版页面已包含二维码 PNG；优先读取该位图，避免低配 VPS 的页面截图阻塞，并保留原选择器/截图回退。公网二维码创建返回 200（首次冷启动约 42 秒），PNG 图片获取为 200，已目视确认二维码。测试会话结束后 active_jobs/profile_locks/profile_readers 均为 0，没有退出真实登录账号。
 - 因低配冷启动而给 QR 准备设置有界的 60 秒服务端预算、90 秒客户端预算；二维码生成后的 180 秒有效期不变。数据与接口字段保持兼容。
 
-访问凭据由 `deploy/create-access.mjs` 生成，只保留在忽略的私密文件和 VPS Nginx 中，不在本报告或 GitHub 中公开。完整站点冒烟报告在本机 `deploy/private/site-verification.json`。
+初次部署曾生成入口凭据，只保留在忽略的私密文件和 VPS Nginx 中，不在本报告或 GitHub 中公开。该入口认证与密码生成工具现已移除，原私密备份未删除。初次站点冒烟报告保留在本机 `deploy/private/site-verification.json`，不改写其历史结果。
 
 GitHub 的 main 要求 PR 与状态检查，因此代码推送到 `codex/performance-vps-deploy`，提交 PR [#20](https://github.com/ftweg2/b-music/pull/20)，没有绕过分支保护。CI/Release 的 Node 主版本与生产镜像统一为 24。
+
+## 入口访问方式更新（2026-09-05）
+
+按用户要求，本站 Nginx 明确设置 `auth_basic off`，不再要求额外的入口用户名或密码；部署脚本同步移除凭据生成/安装流程。HTTPS、B 站扫码登录、内核回环端口和数据目录保持不变。
+
+这是单个活动 B 站账号的共享服务，知道网址的人可以访问 App 及其音乐库、播放和账号操作；B 站登录不是访客级多用户鉴权。现行部署说明以 [deploy/README.md](../../../deploy/README.md) 为准。
+
+现行站点验收默认只读，不携带 Authorization 或 Cookie，断言匿名访问成功且无 `WWW-Authenticate`，不会发起或取消扫码登录。新报告按时间戳保存在 `deploy/private/site-verification-*.json`，保留初次部署记录。
+
+本次线上只读验收通过：主页、3 个静态资源及 8 个 API 共 12 次 GET 均为 200，且均无入口认证挑战；HTTP 仍以 301 跳转 HTTPS。报告为 `deploy/private/site-verification-2026-09-05T13-37-41-694Z.json`。仅在 `nginx -t` 成功后平滑重载 Nginx；App、kernel 和原监控容器的启动时间及重启计数未变，其他三个 Nginx 配置的哈希与初次部署记录一致。旧站点配置及部署脚本备份保留在 VPS 的 `/opt/bmusic/private/no-basic-auth.Wc7u4sB0/`，音乐库与登录数据未修改。
+
+## 扫码稳定性更新（2026-09-05，20260905-login-r5）
+
+按「本机修复与验证 → 本机构建 Linux 镜像 → SSH 上传并校验 → VPS 隔离测试 → 备份切换」完成。VPS 没有运行构建或依赖安装命令。
+
+修复依据是生产日志中的 `_capture_login_qr` 超时与未捕获的 `TimeoutError`。新实现使用同一内核 profile 请求上下文调用 B 站网页二维码接口并生成 PNG，避免整页加载/截图；不再每 60 秒替换客户端仍在显示的二维码。有效期从准备完成开始，加入并发准备复用、短暂故障有限重试、取消清理和明确的 502/503/504 错误。前端增加有效期提示、图片重载和手机二维码自动定位。详见 [内核登录说明](../../../kernel/docs/LOGIN_RELIABILITY.md) 和 [API 调用说明](API_USAGE.md)。
+
+- 内核 140 项、App 21 项集成与 102 项单元测试通过；Linux 镜像内核测试也通过。
+- 实际生产镜像的 40 个 API 操作、1,489 次完整 HTTP 回归通过；账号/播放区间 248 次调用通过；额外登录故障注入通过。
+- 实际桌面/手机 UI 验证了二维码图片重载不新建会话、倒计时、二维码完整可见、确认后关闭二维码，无 JS 页面异常。
+- 本机相同 512 MiB/1 核上限下，最终内核真实 B 站二维码准备约 1.14 秒和 0.66 秒。VPS 使用更低的 256 MiB/0.75 核临时容器，两轮约 37 秒和 19 秒；均未读取或退出现有用户资料，二维码保持不变，过期清理正常。这是有限实测，不保证未来上游永远可用。
+- VPS 已运行 `bmusic-app:20260905-login-r5`、`bmusic-kernel:20260905-login-r5`，两者健康。只读上线验收的 12 次 GET 均为 200，仍无入口密码弹窗。
+- 升级前后收藏、关注、曲目、歌单、歌单内容和播放区间的行数与 SHA-256 完全一致，SQLite quick_check 通过；21 条内核任务、25 个 artifact 保留。原 Nginx 配置哈希及 komari 启动时间、重启计数未变。
+
+完整停写数据快照和原配置位于 VPS `/opt/bmusic/private/login-r5.zP1bwdeH/`，其中 `data.tar.gz` 已通过 gzip 校验。源码归档位于 `/opt/bmusic/releases/20260905-login-r5/source.tar.gz`。本地上线报告为 `deploy/private/site-verification-2026-09-05T15-18-43-010Z.json`，数据摘要为 `deploy/private/login-release-before.json` 与 `login-release-after.json`。原本机实例未替换；临时测试容器与测试数据卷已清理，测试报告和截图保留。
+
+镜像包 SHA-256：`014523b6549de74aafb9834c82863491b40876fb7b773b7729c1c6ea721943b2`；源码包 SHA-256：`eb2afff38cdf746c24a8188c4027b026cc5cdf8a2607f887edafb24c6c2776a8`。两者上传后均校验一致。真实账号最后的手机扫码确认需要账号持有人操作，不用隔离夹具的测试身份冒充本人登录验收。
+
+上线后还在确认当前未登录且无待扫码会话时，携带最新账号上下文验证了一次实际网站入口：`POST /api/kernel/login/start` 为 200，约 26.56 秒返回，二维码 PNG 为 200、836 字节，有效期 180 秒，没有入口认证挑战。未调用 logout，这次待扫码会话留给用户复用或自然过期；没有把“二维码已生成”记为本人已完成登录。

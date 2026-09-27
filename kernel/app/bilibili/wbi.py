@@ -88,7 +88,26 @@ def _mixin_key(img_key: str, sub_key: str) -> str:
     return "".join(raw[index] for index in MIXIN_KEY_ENC_TAB if index < len(raw))[:32]
 
 
+# WBI keys are public, shared by all visitors and rotate about once a day.
+# Reusing them for a few minutes saves one nav request per playurl call.
+WBI_KEY_TTL_SECONDS = 600.0
+_wbi_key_cache: dict[str, object] = {}
+
+
+def reset_wbi_key_cache() -> None:
+    _wbi_key_cache.clear()
+
+
 async def get_wbi_keys(client: httpx.AsyncClient, user_agent: str) -> tuple[str, str]:
+    cached = _wbi_key_cache.get("keys")
+    if cached and time.monotonic() - float(_wbi_key_cache["fetched_at"]) < WBI_KEY_TTL_SECONDS:
+        return cached  # type: ignore[return-value]
+    keys = await _fetch_wbi_keys(client, user_agent)
+    _wbi_key_cache.update(keys=keys, fetched_at=time.monotonic())
+    return keys
+
+
+async def _fetch_wbi_keys(client: httpx.AsyncClient, user_agent: str) -> tuple[str, str]:
     response = await client.get(
         "https://api.bilibili.com/x/web-interface/nav",
         headers={"user-agent": user_agent, "referer": "https://www.bilibili.com/"},

@@ -8,6 +8,8 @@ import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { openPlaylistPicker } from "@/lib/playlistClient";
 import type { CandidateItem } from "@/lib/models";
+import { unknownCreatorLabel, watchOnSourceLabel } from "@/lib/videoRef";
+import { coverThumbnail } from "@/lib/coverImage";
 import { downloadCandidate, playCandidate } from "./PlayerDock";
 import { PlayIcon, HeartIcon, DownloadIcon, CheckIcon, ExternalLinkIcon, CopyIcon, MusicIcon, UsersIcon, ListMusicIcon } from "./Icons";
 
@@ -77,10 +79,10 @@ export function CandidateCard({ candidate, index = 0, returnTo, extraActions }: 
     try {
       await navigator.clipboard.writeText(candidate.sourceUrl);
       setCopied(true);
-    } catch { setFeedback("无法复制，请从「在 B 站观看」打开原视频"); }
+    } catch { setFeedback(`无法复制，请从「${watchOnSourceLabel(candidate.bvid)}」打开原视频`); }
   }
 
-  const cover = candidate.coverUrl?.startsWith("//") ? `https:${candidate.coverUrl}` : candidate.coverUrl;
+  const cover = coverThumbnail(candidate.coverUrl, "card");
   const duration = candidate.durationSeconds ? `${Math.floor(candidate.durationSeconds / 60)}:${String(candidate.durationSeconds % 60).padStart(2, "0")}` : "--:--";
 
   return (
@@ -94,7 +96,7 @@ export function CandidateCard({ candidate, index = 0, returnTo, extraActions }: 
       <div className="cardBody">
         <Link href={`/candidates/${candidate.id}${returnTo ? `?returnTo=${encodeURIComponent(returnTo)}` : ""}`} className="cardTitle" title={candidate.title}>{candidate.title}</Link>
         <div className="cardAuthorRow">
-          <span className="cardAuthorName">{candidate.creatorName || "未知 UP 主"}</span>
+          <span className="cardAuthorName">{candidate.creatorName || unknownCreatorLabel(candidate.bvid)}</span>
           {creatorFollowed && <span className="authorFollowedBadge">已关注</span>}
         </div>
       </div>
@@ -116,7 +118,7 @@ export function CandidateCard({ candidate, index = 0, returnTo, extraActions }: 
               <button type="button" onClick={() => downloadCandidate(candidate)}><DownloadIcon size={15} />下载到设备</button>
               {candidate.creatorMid && (creatorFollowed ? <Link href="/creators"><UsersIcon size={15} />管理关注</Link> : <button type="button" disabled={followBusy} onClick={() => void followCreator()}><UsersIcon size={15} />关注这位 UP 主</button>)}
               <button type="button" onClick={() => void copyLink()}>{copied ? <CheckIcon size={15} /> : <CopyIcon size={15} />}{copied ? "链接已复制" : "复制视频链接"}</button>
-              <a href={candidate.sourceUrl} target="_blank" rel="noreferrer"><ExternalLinkIcon size={15} />在 B 站观看</a>
+              <a href={candidate.sourceUrl} target="_blank" rel="noreferrer"><ExternalLinkIcon size={15} />{watchOnSourceLabel(candidate.bvid)}</a>
             </div>
           </details>
         </div>

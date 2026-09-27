@@ -4,6 +4,7 @@ import { accountFetch } from "@/lib/accountClient";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { ACCOUNT_CHANGE_EVENT } from "@/lib/accountEvents";
+import { findDouyinLink } from "@/lib/douyinLink";
 import { LIBRARY_CHANGE_EVENT, type LibraryChange } from "@/lib/libraryEvents";
 import { followedFirst } from "@/lib/search/order";
 import {
@@ -120,7 +121,11 @@ export function SearchBox({ initialQuery = "" }: { initialQuery?: string }) {
       <form onSubmit={(event) => { event.preventDefault(); begin(); }}>
         <div className="searchHeroTop">
           <div className="searchBarWrapper"><SearchIcon size={18} className="searchBarIcon" />
-            <input ref={input} className="searchHeroInput" aria-label="搜索歌曲名、歌手、UP 主或 BV 号" placeholder="搜索歌曲、歌手、UP 主或 BV 号" maxLength={200} value={keyword} disabled={loading} onChange={(event) => setKeyword(event.target.value)} />
+            <input ref={input} className="searchHeroInput" aria-label="搜索歌曲名、歌手、UP 主，或粘贴 BV 号、抖音分享链接" placeholder="搜索歌曲、歌手、UP 主，或粘贴 BV 号 / 抖音分享链接" maxLength={200} value={keyword} disabled={loading} onChange={(event) => setKeyword(event.target.value)} onPaste={(event) => {
+              // Douyin share texts can exceed the input limit; keep just the link they carry.
+              const link = findDouyinLink(event.clipboardData.getData("text"));
+              if (link) { event.preventDefault(); setKeyword(link); setNotice("已识别抖音链接，点击搜索获取作品"); }
+            }} />
             {keyword ? <button type="button" className="searchClearBtn" aria-label="清空搜索词" disabled={loading} onClick={() => setKeyword("")}><CloseIcon size={14} /></button> : <kbd className="searchShortcut">Ctrl K</kbd>}
           </div>
           <button type="submit" className="searchSubmit" disabled={loading}>{loading ? <RefreshIcon className="playerDiscSpin" size={16} /> : <SearchIcon size={16} />}{loading ? "搜索中" : "搜索"}</button>

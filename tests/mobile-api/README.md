@@ -26,6 +26,14 @@
 
 这是有边界的重复验收，不代表对真实上游可用性或未来所有输入“永远零 bug”的证明。首轮调试报告也保留，不冒充通过结果。正式部署与真实账户的有限联调证据在 `bili-music-app/src/docs/MOBILE_API_ACCEPTANCE.md` 中单独记录。
 
+当前优化的 Compose 镜像验收、版本和最新证据见
+[`deploy/RUNTIME_OPTIMIZATION.md`](../../deploy/RUNTIME_OPTIMIZATION.md)。
+`login-ui.py` 和 `playback-ui.py` 在同一隔离 Compose 网络中的一次性浏览器
+容器里运行；`/qa/reports` 映射到本目录的忽略报告目录。它们只接受带
+`isolated-only` 标识的内核，使用合成账号/音频，截图和 JSON 写入唯一子目录，
+不会覆盖历史 UI 报告。播放 UI 检查包含真实音频的起止边界、双曲目队列不
+自动前进、桌面/手机区间同步、手机按钮可见性及换号后的旧音频停止。
+
 保留隔离服务后，可补充原生生命周期验收：
 
 ```powershell

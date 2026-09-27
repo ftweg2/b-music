@@ -1,10 +1,11 @@
 import { ApiError } from "./api";
 import { getCandidateByBvid, getDatabase, nowIso } from "./db";
 import type { PlaybackRange } from "./playbackRange";
+import { isVideoRef } from "./videoRef";
 
 export const MAX_PLAYBACK_SECONDS = 7 * 24 * 60 * 60;
 export function playbackBvid(value: unknown): string {
-  if (typeof value !== "string" || !/^BV[0-9A-Za-z]{10}$/.test(value)) throw new ApiError(400, "INVALID_BVID", "请提供有效的 BV 号");
+  if (!isVideoRef(value)) throw new ApiError(400, "INVALID_BVID", "请提供有效的 BV 号或抖音作品编号");
   return value;
 }
 

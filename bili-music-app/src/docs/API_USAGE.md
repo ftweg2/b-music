@@ -1,6 +1,8 @@
 # B-Music API 调用文档
 
-版本：v1 · revision 1.2.0 · 校准日期：2026-09-05
+版本：v1 · revision 1.3.0 · 校准日期：2026-09-27
+
+1.3.0 相对 1.2.0 只做了新增：搜索支持抖音链接，视频编号可以是 `DY` 开头；新增 `GET /api/covers/{bvid}` 提供抖音封面。已有接口的请求和响应都没变。
 
 这是手机、网页和桌面客户端的统一调用指南。请求/响应的完整字段及类型由 [OpenAPI 3.1](http://127.0.0.1:3000/api/openapi.json) 提供；部署后改用自己的 Base URL 请求 `GET /api/openapi.json`。歌单、分页、账号的补充文档只解释产品行为，不再维护另一套接口参数表。
 
@@ -31,7 +33,7 @@ curl "$BASE_URL/api/kernel/login/status"
 
 JSON 请求发送 `Content-Type: application/json`，请求体必须是对象且不超过 64 KiB。使用正整数 ID、数字分页参数、真正的布尔值；新客户端统一使用 camelCase 字段。
 
-响应头包括 `X-API-Version: 1`、`X-API-Revision: 1.2.0` 和 `X-Request-Id`。客户端可发送自己的 `X-Request-Id`：1–64 位字母、数字、下划线或连字符。
+响应头包括 `X-API-Version: 1`、`X-API-Revision: 1.3.0` 和 `X-Request-Id`。客户端可发送自己的 `X-Request-Id`：1–64 位字母、数字、下划线或连字符。
 
 读登录状态后，业务请求携带 `X-Account-Context: 返回的sessionKey`，防止旧页面在换号后误写。响应还可带 `X-Account-Id` 和 `X-Account-Context`。收到 `409 / ACCOUNT_CHANGED` 时停止当前操作，重新读取账号并清理当前展示/播放状态；不要自动把旧操作提交到新账号。这些字段是上下文校验，不是公网鉴权令牌。
 
@@ -81,7 +83,7 @@ CORS 只解决浏览器来源限制，不提供用户鉴权。默认单用户客
 
 ## 3. 全部接口
 
-业务契约共 29 条路径、40 个方法操作。另有文档入口 `GET /api/openapi.json` 和各路径的 OPTIONS。
+业务契约共 30 条路径、41 个方法操作。另有文档入口 `GET /api/openapi.json` 和各路径的 OPTIONS。
 
 ### 服务与登录
 
@@ -142,6 +144,7 @@ CORS 只解决浏览器来源限制，不提供用户鉴权。默认单用户客
 | GET | `/api/tracks/{id}/download` | 附件下载流 |
 | HEAD | `/api/tracks/{id}/download` | 下载资源头，无响应体 |
 | GET | `/api/image-proxy` | 封面位图流；查询参数 `url` |
+| GET | `/api/covers/{bvid}` | 抖音作品封面（`DY…`）；直接请求候选返回的 `coverUrl` |
 
 ## 4. 登录、退出与换号
 
@@ -160,6 +163,10 @@ CORS 只解决浏览器来源限制，不提供用户鉴权。默认单用户客
 5. 有效待扫码会话的重复 start 会复用二维码；不要靠不停创建会话刷新二维码。
 
 低配服务器首次启动浏览器可能较慢。客户端使用 capabilities.defaults.loginStartTimeoutMs（当前 90000 ms）作为二维码创建请求的上限；这个等待不计入二维码本身的 expiresInSeconds。服务器仍有独立的、有界的准备超时，不会无限等待。
+
+二维码现由内核调用 B 站网页使用的生成/轮询接口后编码，不再加载整个登录页并截图。同一会话的图片在有效期内不变，后台不会每 60 秒偷偷换码；生成中的并发 start 也复用同一次准备。上游轮询的短暂网络错误会在会话有效期内有限重试。客户端仅在 `loggedIn:true` 时视为登录成功，不能把扫码或确认按钮状态当成已验证账号。
+
+登录错误保留统一的 `error/code/retryable/requestId`：`504 / LOGIN_PREPARATION_TIMEOUT` 或 `LOGIN_UPSTREAM_TIMEOUT` 表示准备或上游超时；`502 / LOGIN_UPSTREAM_UNAVAILABLE` 表示连接中断；`503 / LOGIN_UPSTREAM_RESTRICTED` 表示上游限制，`retryable:false` 时不自动重试，也不尝试绕过验证。可重试错误遵守 `Retry-After`，由用户重试时优先复用现有待扫码会话。网关返回非 JSON 错误时显示服务暂不可用，不把 HTML 当正常登录结果。已验证登录时 start 返回 409，换号必须先确认 logout。
 
 二维码地址已包含必要查询参数，不手工填写 profile/owner。登录成功、过期或取消后，旧二维码通常返回 404。
 
@@ -183,7 +190,7 @@ curl -X POST "$BASE_URL/api/kernel/login/logout" -H "Content-Type: application/j
 
 | 字段 | 类型 | 规则 |
 | --- | --- | --- |
-| `keyword` | string | 必填，非空，最多 200 字符；关键词、BV 或视频页面链接 |
+| `keyword` | string | 必填，非空，最多 200 字符；关键词、BV、视频页面链接，或抖音分享文字/链接 |
 | `useRemote` | boolean | 默认 false；在线搜索需显式 true |
 | `provider` | string | 新在线搜索默认 auto；可选 auto/bilibili/kernel；mock 不用于正式客户端 |
 | `limit` | integer | 默认 20；请求 1–50，在线通常上限 20，以响应实际值为准 |
@@ -208,6 +215,25 @@ curl -X POST "$BASE_URL/api/search" -H "Content-Type: application/json" -d '{"ke
 ```
 
 auto 只在新搜索时选择来源：已登录优先 kernel，未登录或暂时读不到登录状态时选择 bilibili。选定来源的在线请求失败后不会自动改查本地。显式 kernel 要求有效登录。
+
+### 抖音链接
+
+keyword 中含有抖音链接（`v.douyin.com` 分享短链、`www.douyin.com/video/<id>`、带 `modal_id` 的精选页链接、`iesdouyin.com` 分享页）时，按 `source: "direct"` 处理，只返回这一个作品，不做关键词搜索：
+
+- `useRemote: true`：App 请内核读取作品的公开信息（`POST /v1/douyin/resolve`），生成一条候选。耗时视服务器网络而定，一般 7–20 秒，客户端的请求超时不要短于 90 秒。每个账号每分钟最多 12 次，内核忙时返回可重试的 503。候选的 `bvid` 为 `DY` 加作品编号，例如 `DY7687946506598968422`；`creatorMid` 始终为 null，不会匹配已关注的 UP 主。
+- 封面：内核解析时缓存封面，候选的 `coverUrl` 是 App 相对地址 `/api/covers/DY…`（原生客户端请拼上服务地址）。抖音只提供会过期的签名图片地址，App 不保存它们。没有封面时 `coverUrl` 为 null。B 站候选的 `coverUrl` 仍是 hdslb.com 地址。
+- 已经保存过同一作品时直接返回保存的候选，不再请求内核（保存时没拿到封面的作品会重新读取一次）；分享短链需要内核解析，每次都会请求。
+- `useRemote: false`：只返回本地已有的候选，不联网。
+- 作品不存在、已删除或仅作者可见时返回 `SEARCH_PROVIDER_FAILED`，`provider` 为 `douyin`。
+
+分享文字可能超过 200 字符；客户端应先从中提取链接再提交。网页搜索框粘贴时会自动只保留链接。
+
+App 本身从不访问抖音，也不保存抖音的媒体地址，所有读取都经过内核。
+
+客户端可以用 `GET /api/capabilities` 判断服务端是否支持：
+- `features.douyinLinks` 为 true：可以提交抖音链接。
+- `features.relativeCoverUrls` 为 true：`coverUrl` 可能是相对地址，需要拼上服务地址。
+- `endpoints.douyinCover`：封面接口的路径模板。
 
 成功响应包含：
 
@@ -376,11 +402,13 @@ curl -X POST "$BASE_URL/api/playlists/7/items" -H "Content-Type: application/jso
 
 | 字段 | 规则 |
 | --- | --- |
-| strategyMode | auto 或 force；新客户端可显式使用 auto |
+| strategyMode | auto 或 force；所有策略参数均省略时默认 force + api_dash，显式 strategyOrder 且省略模式时使用 auto |
 | strategy | force 时必须指定 api_dash/browser_network/mse_sourcebuffer 之一 |
 | strategyOrder | auto 时可指定 1–3 个支持的策略；不传使用内核默认顺序 |
 
 不要在 auto 模式同时指定 strategy，也不要在 force 模式指定 strategyOrder。新客户端不使用兼容的 snake_case 别名。
+
+抖音候选（`bvid` 以 `DY` 开头）忽略上述策略参数，始终使用内核的 `douyin_music` 策略，并保留原始音频：通常是作品背景音乐的 MP3（`media.mimeType` 为 `audio/mpeg`，下载文件名以 `.mp3` 结尾）；作品没有单独的背景音乐时，是从视频中原样复制出来的 AAC 音轨（`.m4a`）。收藏、歌单、播放区间对抖音候选同样可用，`bvid` 参数直接传 `DY…` 编号即可。
 
 以下是省略部分元数据的响应节选：
 
@@ -534,6 +562,10 @@ GET/HEAD 均支持 Range、If-Range、If-None-Match、If-Modified-Since。304 �
 ## 12. 封面、诊断与部署配置
 
 `GET /api/image-proxy?url=编码后的封面URL` 只接受 i0/i1/i2.hdslb.com 的 /bfs/ 路径；拒绝凭据、非默认端口和重定向，HTTP 来源会归一到 HTTPS。允许 JPEG/PNG/WebP/AVIF/GIF/APNG 位图，不接受 SVG、HTML 或任意 image/*。成功为图片流；失败仍按 JSON 错误处理。
+
+B 站原图通常有 250–550 KB。在 hdslb 地址后面加上 `@{宽}w_{高}h_1c.webp`，就能取到按尺寸裁剪的 WebP 缩略图，一般只有 4–19 KB。网页端用的尺寸是：卡片 440×400、详情 600×600、歌单 400×400、播放器 120×120。例如 `https://i0.hdslb.com/bfs/archive/xxx.jpg@440w_400h_1c.webp`，照样经过 `/api/image-proxy` 访问即可。
+
+`GET /api/covers/{bvid}` 只用于抖音作品，`bvid` 必须是 `DY` 加作品编号。它返回内核在解析作品时缓存的封面：JPEG、PNG、WebP 或 GIF，最大 2 MiB，带 `X-Content-Type-Options: nosniff`。没有缓存封面，或者传入的是 BV 编号时，返回 404。直接请求候选里的 `coverUrl` 即可，不要自己拼抖音图片地址。
 
 `GET /api/diagnostics` 仅供调试/管理查看元数据健康，不是推荐或打分接口。不要在普通页面高频调用。
 

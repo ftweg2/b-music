@@ -4,6 +4,40 @@ All notable changes to B-Music are documented here. The project follows [Semanti
 
 ## [Unreleased]
 
+### Added
+
+- Douyin support for one user-supplied link at a time. Paste a Douyin share text or link into search to get a candidate, then play, download, favorite or add it to playlists like a Bilibili video.
+- Kernel `douyin_music` strategy. It keeps the item's background-music file unchanged, and falls back to copying the audio stream out of the item's video.
+- Kernel `POST /v1/douyin/resolve` for public item metadata, and `source_orders` in `GET /v1/strategies`.
+- `DOUYIN_DETAIL_TIMEOUT_SECONDS`, `DOUYIN_DOWNLOAD_CONCURRENCY` and `DOUYIN_MAX_DOWNLOAD_BYTES` kernel settings.
+- Douyin lookup hardening: Chromium sandbox where available, `*.douyin.com`-only page loads, blocked analytics beacons, bounded waiting lookups (`DOUYIN_BUSY`), and a media size cap (`MEDIA_TOO_LARGE`).
+- `download_audio` accepts explicit `concurrency`, `min_parallel_bytes` and `max_bytes`; Bilibili downloads are unchanged.
+- `DOUYIN_MAX_BROWSERS` (default 1). Douyin lookup browsers use lean launch flags, fail fast on crash, and downloaded Douyin media is checked for a real container signature.
+- Small-machine stability for Bilibili: API DASH falls back to `backupUrl` CDN nodes with one retry pass, WBI keys are cached for ten minutes, `browser_network` stops capturing once the playurl audio list is parsed, extraction pages skip image-CDN assets and fonts, and profile browsers are muted.
+- Hourly artifact cleanup while the kernel runs.
+- Bilibili covers are requested at display size through the image CDN's `@{w}w_{h}h_1c.webp` suffix (cards 440×400, details 600×600, playlists 400×400, player 120×120) instead of full originals; a typical cover drops from 250–550 KB to 4–19 KB.
+- Douyin covers: the kernel caches each item's cover when resolving (`has_cover`, `GET /v1/douyin/covers/{aweme_id}`), and the App shows it through `GET /api/covers/{bvid}` on cards, details, playlists and the player. Signed Douyin image URLs are never stored or returned.
+
+### Changed (small machines)
+
+- Douyin lookups count toward `MAX_ACTIVE_JOBS` together with jobs.
+- Douyin defaults for a 0.5-core container: `DOUYIN_DETAIL_TIMEOUT_SECONDS` 45, `DOUYIN_DOWNLOAD_CONCURRENCY` 2; the App waits up to 90 seconds for a Douyin lookup.
+- Shared-host overlay (`deploy/compose.antigravity-safe.yml`): no fixed CPU cap, only a low CPU weight (128), and a 256 MiB App. `deploy/priority-guard.py` moves the kernel's RAM ceiling between 320 and 768 MiB with host headroom, always leaving 300 MiB free. The kernel's page cache is not counted, because host available memory already includes it. It lowers the ceiling on a 32 MiB change and raises it only on a 96 MiB change. After a protective stop it restarts B-Music once Antigravity has been healthy with at least 450 MiB free for five minutes. Three automatic restarts within six hours latch the pause for the operator.
+
+### Security
+
+- Next.js 16.3.0 → 16.3.6 for the Image Optimization AVIF remote code execution advisory (GHSA-2xp9-vwfh-vxw4). The same release also fixes the Windows-hosted server advisory (GHSA-p293-qw3h-jr36). With it come sharp 0.35.4 (libheif, GHSA-rgj7-g3m4-5g8c) and baseline-browser-mapping 2.11.26 (GHSA-w5vr-8v7q-w6rv).
+
+### Fixed
+
+- Closing a Douyin lookup browser after an unavailable or timed-out answer no longer records a spurious browser crash.
+
+### Changed
+
+- The kernel routes each job by source. A strategy that does not belong to the URL's source is rejected before the job is created.
+- Douyin jobs do not take the Bilibili profile's job lock.
+- App video references (`bvid`) accept `DY<item id>` in addition to BV ids, across candidates, favorites, playlists, playback ranges and tracks.
+
 ## [1.2.0] - 2026-08-14
 
 ### Added

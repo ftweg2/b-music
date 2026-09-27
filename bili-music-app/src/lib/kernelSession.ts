@@ -8,6 +8,7 @@ export type KernelProfileResponse = {
   profile_id: string;
   external_owner_id: string;
   status: "created" | "exists";
+  login?: KernelLoginStatusResponse;
 };
 
 export type KernelLoginStartResponse = {
@@ -32,11 +33,11 @@ export function defaultKernelExternalOwnerId(): string {
   return sanitizeText(process.env.KERNEL_EXTERNAL_OWNER_ID || process.env.APP_OWNER_ID || "local", 128) || "local";
 }
 
-export async function ensureDefaultKernelProfile(): Promise<KernelProfileResponse> {
+export async function ensureDefaultKernelProfile(includeLoginStatus = false): Promise<KernelProfileResponse> {
   const externalOwnerId = defaultKernelExternalOwnerId();
   return readKernelJson<KernelProfileResponse>("/v1/profiles", {
     method: "POST",
-    body: JSON.stringify({ external_owner_id: externalOwnerId })
+    body: JSON.stringify({ external_owner_id: externalOwnerId, ...(includeLoginStatus ? { include_login_status: true } : {}) })
   });
 }
 
@@ -56,12 +57,15 @@ export async function getDefaultKernelLoginStatus(): Promise<{
 }
 
 async function readDefaultKernelLoginStatus() {
-  const profile = await ensureDefaultKernelProfile();
-  const payload = await readKernelJson<KernelLoginStatusResponse>(
+  const profile = await ensureDefaultKernelProfile(true);
+  // Old kernels ignore the optional request field: retain their two-request path.
+  // Never cache identity between incoming requests, including across account changes.
+  const payload = profile.login ?? await readKernelJson<KernelLoginStatusResponse>(
     `/v1/profiles/${encodeURIComponent(profile.profile_id)}/login/status?external_owner_id=${encodeURIComponent(
       profile.external_owner_id
     )}`
   );
+  if (payload.profile_id !== profile.profile_id) throw new Error("Kernel returned a mismatched login profile");
   const verifiedOwner = appOwnerIdFromBiliUid(payload.bili_uid);
   if (payload.logged_in && verifiedOwner === "local") throw new Error("Kernel returned an invalid logged-in identity");
   return {

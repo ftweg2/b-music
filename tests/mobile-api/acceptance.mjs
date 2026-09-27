@@ -71,7 +71,7 @@ async function request(method, url, body, options = {}) {
     const expected = options.status ?? 200;
     assert.ok((Array.isArray(expected)?expected:[expected]).includes(response.status),`${method} ${url}: ${response.status} ${JSON.stringify(data)}`);
     assert.equal(response.headers.get("x-request-id"),id,"request tracing");
-    assert.equal(response.headers.get("x-api-revision"),"1.2.0");
+    assert.equal(response.headers.get("x-api-revision"),"1.3.0");
     const op = operation(method,url);
     if (op) {
       const contract = op.value.responses[response.status];
@@ -205,9 +205,10 @@ try {
     persistent=(await post("/api/playlists",{name:"Survives account switching",candidateId:first.candidates[0].id},{status:201})).playlist;
     await post("/api/favorites",{candidateId:first.candidates[0].id},{status:201});
   });
-  await check("real browser QR: retries, expiry, cancel and two account identities",async () => {
+  await check("real HTTP QR: retries, expiry, cancel and two account identities without Chrome",async () => {
     await post("/api/kernel/login/logout",{confirmed:false},{status:400});
     await post("/api/kernel/login/logout",{confirmed:true},{headers:{origin:"capacitor://localhost"}});
+    const initialRuntime=await fixture("state");
     for (let cycle=0;cycle<3;cycle++) {
       await fixture("control",{uid:null});
       const started=await post("/api/kernel/login/start");
@@ -241,6 +242,9 @@ try {
     await post("/api/search",{keyword:"Fixture Auth",useRemote:true,provider:"kernel",page:2,searchId:signedSearch.searchId,sessionKey:signedSearch.sessionKey},{status:409});
     assert.equal((await get("/api/playlists/"+persistent.id)).playlist.id,persistent.id);
     assert.equal((await get("/api/favorites")).items.length,1);
+    const finalRuntime=await fixture("state");
+    assert.equal(finalRuntime.launches,initialRuntime.launches,"HTTP login/search must not launch Chrome");
+    assert.equal(finalRuntime.http_leases,0); assert.equal(finalRuntime.http_contexts,0);
   });
   await check("new search pages while real audio capture and ffmpeg are still active",async () => {
     await fixture("control",{hold_browser:true,hold_media:true});
@@ -324,7 +328,7 @@ try {
     ready=(await until(()=>get(url),(data)=>data.track.status!=="preparing","recovered audio")).track;
     assert.equal(ready.status,"ready",ready.failureReason);
     await request("GET",url+"/download");
-    const clean=await until(()=>fixture("state"),(s)=>!s.active_jobs&&!s.readers&&!s.locks&&!s.browsers,"resources released");
+    const clean=await until(()=>fixture("state"),(s)=>!s.active_jobs&&!s.readers&&!s.locks&&!s.browsers&&!s.http_leases&&!s.http_contexts,"resources released");
     report.finalRuntime=clean;
   });
   await check("cover images reject SVG, redirects and untrusted hosts",async () => {
@@ -333,6 +337,9 @@ try {
       await get("/api/image-proxy?url="+encodeURIComponent("https://i0.hdslb.com/bfs/unsafe.svg"),{status:415});
       await get("/api/image-proxy?url="+encodeURIComponent("https://i0.hdslb.com/bfs/redirect.png"),{status:[400,502]});
       await get("/api/image-proxy?url="+encodeURIComponent("http://127.0.0.1/private"),{status:400});
+      await request("GET","/api/covers/DY7000000000000000001");
+      await get("/api/covers/DY7000000000000000009",{status:404});
+      await get("/api/covers/BV1test00001",{status:404});
     }
   });
   await check("all registered mobile operations have successful HTTP/schema evidence",async () => {

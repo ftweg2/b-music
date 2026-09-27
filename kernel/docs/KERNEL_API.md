@@ -35,12 +35,27 @@ Response:
 }
 ```
 
+The optional boolean request field `include_login_status: true` adds `login` to
+this response, using the same fields (including null identity fields) as the
+login-status endpoint. Profile ownership and status are resolved from one fresh
+database row. Requests without this field retain the original response shape.
+The App uses this combined read and falls back to the old two-request flow when
+an older kernel omits `login`; identity is never cached across incoming requests.
+
 ```http
 POST /v1/profiles/{profile_id}/login/start
 GET /v1/profiles/{profile_id}/login/status?external_owner_id=user_or_team_123
 ```
 
-Login start opens the normal Bilibili login page inside the kernel-owned profile and returns a QR screenshot URL. It must not return cookies, QR token internals, storage state, localStorage, sessionStorage, browser profile paths, or sensitive headers.
+Login start uses the normal first-party Bilibili web QR endpoints inside the kernel-owned profile's request context and returns a QR PNG URL. It does not load or screenshot the full login page. It must not return cookies, QR token internals, storage state, localStorage, sessionStorage, browser profile paths, or sensitive headers.
+
+HTTP-only login/search now use an isolated Playwright request runtime without
+launching Chrome. When an extraction already owns the browser, HTTP readers use
+that browser's request context instead. One kernel profile has only one active
+cookie jar; transitions drain existing readers. A private owner-only journal in
+the profile directory supports cookie persistence and crash recovery, and is
+never an API artifact. Existing Chromium profiles bootstrap once; localStorage
+and other browser-origin data remain in the existing browser profile.
 
 Request:
 
@@ -56,20 +71,20 @@ Response:
 {
   "login_session_id": "ls_xxx",
   "status": "pending",
-  "message": "Scan the QR image from the kernel profile login page...",
+  "message": "Scan the Bilibili QR image and confirm on your phone...",
   "qr_image_url": "/v1/profiles/p_xxx/login/ls_xxx/qr.png?external_owner_id=user_or_team_123",
   "qr_image_sha256": "abc123...",
   "expires_in_seconds": 180
 }
 ```
 
-The QR image is a screenshot artifact from the profile-owned login page. Treat it as sensitive UI material: display it only to the profile owner and do not log it. The kernel keeps the browser context open while the QR login is pending, polls sanitized identity via normal Bilibili identity checks, then stores only `bili_uid`, `nickname`, login status, and verification time.
+The QR image is a PNG encoded from Bilibili's first-party challenge. Treat it as sensitive UI material: display it only to the profile owner and do not log it. The kernel keeps the profile context open while QR login is pending, polls the same challenge without replacing the PNG, and separately verifies identity before recording `bili_uid`, `nickname`, login status, and verification time. Cookies remain solely in that kernel browser profile. Concurrent starts reuse one preparation; the returned lifetime begins at readiness and is at most 180 seconds. Preparation/upstream timeouts return 504 with a stable `X-Error-Code` and `Retry-After`; temporary connection failures return 502/503. Restrictions are not bypassed. See [reliability and failure handling](LOGIN_RELIABILITY.md).
 
 ```http
 GET /v1/profiles/{profile_id}/login/{login_session_id}/qr.png?external_owner_id=user_or_team_123
 ```
 
-Returns only the QR screenshot PNG for that owner/profile/session. It does not return QR token internals.
+Returns only the QR PNG for that owner/profile/session. It does not return QR token internals.
 
 ```http
 GET /v1/profiles/{profile_id}/login/status?external_owner_id=user_or_team_123
@@ -155,6 +170,24 @@ Force mode:
 }
 ```
 
+Douyin item (see [Strategy Policy](STRATEGY_POLICY.md#douyin-music)):
+
+```json
+{
+  "job_id": "j_003",
+  "external_owner_id": "user_or_team_123",
+  "profile_id": "p_xxx",
+  "url": "https://www.douyin.com/video/7687946506598968422",
+  "strategy_mode": "force",
+  "strategy": "douyin_music",
+  "outputs": ["raw"]
+}
+```
+
+`url` accepts Bilibili video URLs or BV ids, and Douyin links on `www.douyin.com`, `douyin.com`, `m.douyin.com`, `www.iesdouyin.com` (`/video/<id>`, `/note/<id>`, `/share/video/<id>`, `?modal_id=<id>`) or `v.douyin.com/<code>/` share links. Job creation does not touch the network; share links are resolved when the job runs. A strategy that does not belong to the URL's source is rejected with `400`.
+
+A successful Douyin job publishes the source audio as the `raw` artifact: `raw.mp3` (`audio/mpeg`) for background music, or `raw.m4a` (`audio/mp4`) when the audio had to be copied out of the video.
+
 ```http
 GET /v1/jobs/{job_id}?external_owner_id=user_or_team_123
 POST /v1/jobs/{job_id}/cancel
@@ -227,6 +260,53 @@ Security requirements:
 - Do not expose Cookie, storage state, browser profile files, sensitive headers, or full signed media URLs.
 - Do not use this endpoint for crawling, account pooling, or access-control bypass.
 
+## Douyin Resolve
+
+```http
+POST /v1/douyin/resolve
+```
+
+Purpose: read public metadata for one user-supplied Douyin link, so an App can show a title before it submits a `douyin_music` job. The kernel opens the public page in a fresh, cookie-less browser; no login or profile state is used. The `profile_id` is only checked for ownership.
+
+Request:
+
+```json
+{
+  "external_owner_id": "user_or_team_123",
+  "profile_id": "p_xxx",
+  "url": "https://v.douyin.com/iRNBho6x/"
+}
+```
+
+Response:
+
+```json
+{
+  "provider": "kernel_douyin",
+  "profile_id": "p_xxx",
+  "aweme_id": "7687946506598968422",
+  "source_url": "https://www.douyin.com/video/7687946506598968422",
+  "title": "item description #tag",
+  "creator_name": "creator",
+  "duration_seconds": 84,
+  "music_title": "song title",
+  "music_author": "artist",
+  "has_music_audio": true,
+  "has_video_audio": true,
+  "has_cover": true
+}
+```
+
+`has_cover` is true when the kernel cached the item's cover while resolving. Douyin only provides signed, expiring cover URLs, so the kernel downloads the cover once (only from `https://*.douyinpic.com`, JPEG/PNG/WebP/GIF, at most 2 MiB, checked by file signature) and keeps up to 2,000 covers under `KERNEL_DATA_DIR/douyin-covers`, dropping the oldest. Read it with:
+
+```http
+GET /v1/douyin/covers/{aweme_id}?external_owner_id=user_or_team_123
+```
+
+It returns the image (`404` when not cached). No Douyin image URL is ever returned.
+
+Errors: `400` for links that are not Douyin items or share links that do not resolve, `403`/`404` for profile ownership, `404` (`DOUYIN_ITEM_UNAVAILABLE`) for deleted, private or filtered items, `503` with `Retry-After` (`DOUYIN_BUSY`) when the kernel is at `MAX_ACTIVE_JOBS` (jobs and lookups share it) or too many lookups are waiting, `503` (`DOUYIN_BROWSER_CRASHED`) when the lookup browser crashed, `504` when the page does not answer within `DOUYIN_DETAIL_TIMEOUT_SECONDS`, and `502` when the page cannot be loaded. No media URLs, cover URLs or cookies are returned.
+
 ## Video Resolve
 
 ```http
@@ -298,6 +378,7 @@ Job states:
 - `running_api_dash`
 - `running_browser_network`
 - `running_mse_sourcebuffer`
+- `running_douyin_music`
 - `processing_media`
 - `succeeded`
 - `failed`
@@ -309,3 +390,18 @@ Job states:
 GET /v1/strategies
 GET /v1/strategies/metrics
 ```
+
+`GET /v1/strategies` lists every strategy and each source's automatic order. `default_order` is the Bilibili order, kept for older clients:
+
+```json
+{
+  "strategies": ["api_dash", "browser_network", "mse_sourcebuffer", "douyin_music"],
+  "default_order": ["api_dash", "browser_network", "mse_sourcebuffer"],
+  "source_orders": {
+    "bilibili": ["api_dash", "browser_network", "mse_sourcebuffer"],
+    "douyin": ["douyin_music"]
+  }
+}
+```
+
+`GET /v1/strategies/metrics` returns, for each strategy, the attempt, success and failure counts, the last success and failure times, the last failure reason, and the average duration. The figures come from the kernel's stored job history.

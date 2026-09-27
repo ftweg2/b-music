@@ -11,7 +11,7 @@ Rules:
 - Does not read artifact files directly.
 - Does not access browser profile files.
 - Does not display Cookie values.
-- Displays only the QR screenshot URL returned by the kernel login API.
+- Displays only the QR PNG URL returned by the kernel login API.
 - Does not receive QR token internals, cookies, storage state, or sensitive headers.
 
 Start:

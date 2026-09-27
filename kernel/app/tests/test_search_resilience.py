@@ -77,7 +77,7 @@ def test_timed_out_browser_startup_releases_profile_lock(tmp_path, monkeypatch):
         def __init__(self, _settings):
             pass
 
-        async def open_context(self, _profile_id):
+        async def open_request_context(self, _profile_id):
             await asyncio.Future()
 
     monkeypatch.setattr("app.bilibili.search.BrowserContextManager", HungManager)

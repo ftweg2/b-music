@@ -6,6 +6,8 @@ import { currentAppOwnerId } from "@/lib/appOwner";
 import { favoriteBvids, getCandidateById, listCandidateInteractions } from "@/lib/db";
 import { safeInternalReturnTo } from "@/lib/navigation";
 import { toCandidateItems } from "@/lib/search/cache";
+import { unknownCreatorLabel, videoSource, watchOnSourceLabel } from "@/lib/videoRef";
+import { coverThumbnail } from "@/lib/coverImage";
 import {
   ExternalLinkIcon,
   MusicIcon,
@@ -30,6 +32,7 @@ export default async function CandidateDetailPage({ params, searchParams }: Prop
   const ownerId = await currentAppOwnerId();
   const item = toCandidateItems([candidate], ownerId)[0];
   const interactions = listCandidateInteractions(candidate.id, ownerId);
+  const isDouyin = videoSource(candidate.bvid) === "douyin";
 
   return (
     <div className="detailPage">
@@ -42,7 +45,7 @@ export default async function CandidateDetailPage({ params, searchParams }: Prop
         <div className="detailArtwork">
           {candidate.coverUrl ? (
             <img
-              src={candidate.coverUrl}
+              src={coverThumbnail(candidate.coverUrl, "detail") ?? undefined}
               alt={candidate.title}
               referrerPolicy="no-referrer"
             />
@@ -54,7 +57,7 @@ export default async function CandidateDetailPage({ params, searchParams }: Prop
         <div className="detailHeroContent">
           <span className="sectionKicker">CANDIDATE TRACK</span>
           <h1>{candidate.title}</h1>
-          <p className="detailCreator">{candidate.creatorName ?? "未知 UP 主"}</p>
+          <p className="detailCreator">{candidate.creatorName ?? unknownCreatorLabel(candidate.bvid)}</p>
 
           <div className="detailBadges">
             {item.isPreferredCreator && <span className="badge accent">关注 UP 主</span>}
@@ -68,7 +71,7 @@ export default async function CandidateDetailPage({ params, searchParams }: Prop
             <DownloadCandidateButton candidate={item} />
             <a className="button secondary" href={candidate.sourceUrl} target="_blank" rel="noreferrer">
               <ExternalLinkIcon size={14} />
-              在 B 站观看
+              {watchOnSourceLabel(candidate.bvid)}
             </a>
           </div>
 
@@ -82,7 +85,7 @@ export default async function CandidateDetailPage({ params, searchParams }: Prop
               <dd>{formatDate(candidate.pubTime)}</dd>
             </div>
             <div>
-              <dt>BVID</dt>
+              <dt>{isDouyin ? "抖音作品" : "BVID"}</dt>
               <dd>{candidate.bvid}</dd>
             </div>
           </dl>
@@ -102,8 +105,8 @@ export default async function CandidateDetailPage({ params, searchParams }: Prop
           <div className="tableWrapper">
             <table className="table detailTable">
               <tbody>
-                <Row label="BVID / AID" value={`${candidate.bvid} (${candidate.aid || "无 AID"})`} />
-                <Row label="UP 主" value={`${candidate.creatorName ?? "未知"} ${candidate.creatorMid ? `[MID: ${candidate.creatorMid}]` : ""}`} />
+                <Row label={isDouyin ? "抖音作品编号" : "BVID / AID"} value={isDouyin ? candidate.bvid : `${candidate.bvid} (${candidate.aid || "无 AID"})`} />
+                <Row label={isDouyin ? "作者" : "UP 主"} value={`${candidate.creatorName ?? "未知"} ${candidate.creatorMid ? `[MID: ${candidate.creatorMid}]` : ""}`} />
                 <Row label="时长" value={candidate.durationSeconds ? `${candidate.durationSeconds} 秒` : "-"} />
                 <Row label="视频简介" value={candidate.description || "暂无简介"} />
                 <Row label="命中搜索词" value={candidate.searchKeyword || "-"} />

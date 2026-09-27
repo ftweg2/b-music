@@ -18,6 +18,13 @@
     errors: []
   };
   let nextSegmentOrder = 0;
+  let capturedBytes = 0;
+  let accepting = true;
+  const pending = new Set();
+  window.__biliCtfAudioMseFinish = function () {
+    accepting = false;
+    return Promise.all(Array.from(pending));
+  };
 
   function rememberError(stage, error) {
     const errors = window.__BILI_CTF_AUDIO_MSE_STATS__.errors;
@@ -31,19 +38,22 @@
     });
   }
 
-  function copyBufferSource(source) {
+  function bufferSourceView(source) {
     if (source instanceof ArrayBuffer) {
-      return source.slice(0);
+      return new Uint8Array(source);
     }
     if (ArrayBuffer.isView(source)) {
-      return source.buffer.slice(source.byteOffset, source.byteOffset + source.byteLength);
+      return new Uint8Array(source.buffer, source.byteOffset, source.byteLength);
     }
     return null;
   }
 
-  function toBase64(arrayBuffer) {
-    const buffer = arrayBuffer || new ArrayBuffer(0);
-    const bytes = new Uint8Array(buffer);
+  function toBase64(bytes) {
+    // Encode synchronously before the original appendBuffer can detach/reuse the
+    // input. Modern Chrome avoids the large intermediate binary string entirely.
+    if (typeof bytes.toBase64 === "function") {
+      return bytes.toBase64();
+    }
     let binary = "";
     const chunkSize = 0x8000;
     for (let index = 0; index < bytes.length; index += chunkSize) {
@@ -108,17 +118,33 @@
       sourceBuffer.appendBuffer = function (bufferSource) {
         try {
           window.__BILI_CTF_AUDIO_MSE_STATS__.appendCount += 1;
-          const copy = copyBufferSource(bufferSource);
-          if (copy && typeof window.__biliCtfAudioSegment === "function") {
+          const bytes = bufferSourceView(bufferSource);
+          if (accepting && bytes && bytes.byteLength && typeof window.__biliCtfAudioSegment === "function") {
+            const limits = window.__BILI_CTF_AUDIO_MSE_LIMITS__;
+            if (limits && (bytes.byteLength > limits.segmentBytes ||
+                capturedBytes + bytes.byteLength > limits.totalBytes || nextSegmentOrder >= limits.segments)) {
+              accepting = false;
+              window.__BILI_CTF_AUDIO_MSE_STATS__.captureLimitExceeded = true;
+              throw new Error("MSE capture size or segment limit exceeded");
+            }
+            const encoded = toBase64(bytes);
+            capturedBytes += bytes.byteLength;
             window.__BILI_CTF_AUDIO_MSE_STATS__.capturedCount += 1;
-            window.__biliCtfAudioSegment({
+            const sent = Promise.resolve(window.__biliCtfAudioSegment({
               mimeType: String(mimeType || ""),
               order: nextSegmentOrder++,
-              size: copy.byteLength || 0,
-              dataBase64: toBase64(copy)
+              size: bytes.byteLength,
+              dataBase64: encoded
+            })).catch(function (error) {
+              accepting = false;
+              window.__BILI_CTF_AUDIO_MSE_STATS__.captureFailed = true;
+              rememberError("segmentDelivery", error);
             });
+            pending.add(sent);
+            sent.then(function () { pending.delete(sent); });
           }
         } catch (error) {
+          window.__BILI_CTF_AUDIO_MSE_STATS__.captureFailed = true;
           rememberError("appendBuffer", error);
         }
         return originalAppendBuffer.call(this, bufferSource);

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
+from collections.abc import Callable
 from pathlib import Path
 from pathlib import PurePosixPath
 from urllib.parse import urlencode, urlparse
@@ -13,7 +14,9 @@ from app.bilibili.bvid import normalize_video_url, parse_bvid
 from app.bilibili.playurl import select_best_audio
 from app.bilibili.wbi import MIXIN_KEY_ENC_TAB
 from app.browser.context_manager import BrowserContextManager
+from app.browser.responses import managed_response
 from app.browser.network_capture import MediaCandidate, NetworkCapture
+from app.browser.page_budget import skip_decorative_resources
 from app.media_pipeline import ffprobe_json
 from app.models import StrategyName
 from app.security import sanitize_text
@@ -45,6 +48,7 @@ class BrowserNetworkStrategy:
             video_url = normalize_video_url(context.url)
             managed = await manager.open_context(context.profile_id)
             page = await managed.new_page()
+            await skip_decorative_resources(page)
             capture = NetworkCapture()
             capture.attach(page)
 
@@ -58,6 +62,7 @@ class BrowserNetworkStrategy:
                 page,
                 context.settings.network_capture_ms,
                 context,
+                ready=lambda: _has_playurl_audio_list(capture.best_candidate()),
             )
             await capture.finish()
             context.raise_if_cancelled()
@@ -213,13 +218,23 @@ async def _wait_with_cancellation(
     page: object,
     wait_ms: int,
     context: StrategyContext,
+    ready: Callable[[], bool] | None = None,
 ) -> None:
     remaining = max(0, wait_ms)
     while remaining > 0:
         context.raise_if_cancelled()
+        if ready is not None and ready():
+            return
         interval = min(500, remaining)
         await page.wait_for_timeout(interval)
         remaining -= interval
+
+
+def _has_playurl_audio_list(candidate: object | None) -> bool:
+    # The player's playurl response lists every audio quality at once, and it
+    # outranks any single captured segment, so waiting longer cannot improve
+    # the choice. Stop capturing as soon as it has been parsed.
+    return candidate is not None and "playurl_dash_audio" in getattr(candidate, "reasons", ())
 
 
 async def _download_candidate(
@@ -341,9 +356,10 @@ async def _candidate_from_context_playurl(
         params={"bvid": bvid},
         headers=headers,
     )
-    if metadata_response.status != 200:
-        return None
-    metadata_payload = await metadata_response.json()
+    async with managed_response(metadata_response):
+        if metadata_response.status != 200:
+            return None
+        metadata_payload = await metadata_response.json()
     if metadata_payload.get("code") != 0:
         return None
     metadata = metadata_payload.get("data") or {}
@@ -365,9 +381,10 @@ async def _candidate_from_context_playurl(
         params=signed,
         headers=headers,
     )
-    if playurl_response.status != 200:
-        return None
-    playurl_payload = await playurl_response.json()
+    async with managed_response(playurl_response):
+        if playurl_response.status != 200:
+            return None
+        playurl_payload = await playurl_response.json()
     if playurl_payload.get("code") != 0:
         return None
     audio = select_best_audio(playurl_payload.get("data") or {})
@@ -392,7 +409,8 @@ async def _sign_wbi_params_with_context(
         "https://api.bilibili.com/x/web-interface/nav",
         headers={"user-agent": user_agent, "referer": "https://www.bilibili.com/"},
     )
-    payload = await nav_response.json()
+    async with managed_response(nav_response):
+        payload = await nav_response.json()
     wbi_img = ((payload.get("data") or {}).get("wbi_img") or {})
     img_key = _url_stem(str(wbi_img.get("img_url") or ""))
     sub_key = _url_stem(str(wbi_img.get("sub_url") or ""))

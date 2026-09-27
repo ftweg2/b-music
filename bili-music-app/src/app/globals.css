@@ -70,6 +70,7 @@ button.ghost:hover:not(:disabled), .button.ghost:hover { background: var(--bg-su
 button.danger, .button.danger { color: var(--accent-danger); background: #f6e9e7; }
 .iconBtn, .cardIconAction { width: 34px; min-height: 34px; padding: 0; border-radius: 50%; }
 .iconBtn.primary { background: #e2eadb; color: var(--accent); }
+.playerFavoriteButton.isFavorited, .playerFavoriteButton.isFavorited:hover:not(:disabled) { color: var(--accent-danger); background: #f5e8e4; }
 .textLink { display: inline-flex; flex: 0 0 auto; min-height: 32px; align-items: center; gap: 8px; padding: 0; border: 0; background: transparent; color: var(--accent); font-size: 12px; text-decoration: none; }
 button.textLink:hover:not(:disabled), .textLink:hover { background: transparent; color: #162f20; }
 .textLink span { font-size: 17px; }

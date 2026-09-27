@@ -50,7 +50,7 @@ def test_search_close_failure_still_releases_profile_lock(tmp_path, monkeypatch)
         def __init__(self, _settings) -> None:
             pass
 
-        async def open_context(self, _profile_id):
+        async def open_request_context(self, _profile_id):
             return CloseFailureManaged()
 
     monkeypatch.setattr(

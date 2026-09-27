@@ -17,7 +17,27 @@ This kernel is for authorized CTF audio extraction only.
 
 Browser login state stays inside kernel-owned profile storage. A future backend may store profile ownership metadata and sanitized login status, but raw browser profiles and session secrets must never be exported or leaked from the kernel.
 
-QR login is allowed only as normal user-driven login inside the kernel-owned profile. The kernel may return a short-lived QR screenshot image URL for the matching `external_owner_id` and `profile_id`; it must not return QR token internals, cookies, storage state, or browser profile files. Treat QR screenshots as sensitive UI material and do not log them.
+The HTTP runtime's owner-only cookie handoff journal is also profile data, not
+metadata or an audio artifact. It never leaves the kernel, is not served by any
+route, and is removed by the same guarded logout as the browser profile. HTTP and
+browser runtimes for one profile never own independent live cookie jars. Origin
+storage remains in the persistent browser profile. Storage-state initialization
+errors must not quote cookie values in API responses or logs.
+
+QR login is allowed only as normal user-driven login inside the kernel-owned profile, including the first-party web QR endpoints through that profile's shared request context. The kernel may return a short-lived QR PNG image URL for the matching `external_owner_id` and `profile_id`; it must not return QR token internals, cookies, storage state, or browser profile files. Treat QR images as sensitive UI material and do not log them. User confirmation and independently verified Bilibili identity remain required; upstream restrictions must not be bypassed.
+
+## Douyin Public Items
+
+Douyin support reads public items only, one user-supplied link at a time:
+
+- No Douyin login, cookies, cookie import or profile storage. Each lookup uses a fresh browser context that is discarded afterwards.
+- No stealth: the browser keeps its default automated identity (`navigator.webdriver`, headless user agent). No request signing is reimplemented; the public page makes its own requests.
+- Private, deleted, filtered or region-limited items fail with `DOUYIN_ITEM_UNAVAILABLE`; they are not retried through other means.
+- Share-link redirects and media downloads are restricted to Douyin hosts and Douyin media CDNs, checked before each request, including redirects.
+- The lookup browser runs inside Chromium's sandbox where the platform allows it, loads pages only from `https://*.douyin.com`, and blocks analytics beacons and long-lived connections.
+- Media downloads are capped by `DOUYIN_MAX_DOWNLOAD_BYTES`, and waiting lookups are bounded, so one link cannot exhaust disk or queue unbounded browser work.
+- Only the media host is recorded in reports; signed media URLs and cover URLs are never returned.
+- Covers are fetched once through the signed URL the public page supplied and cached by the kernel. The kernel does not rewrite signed image URLs to unsigned hosts to avoid their expiry.
 
 ## Allowed Cookie Import
 
