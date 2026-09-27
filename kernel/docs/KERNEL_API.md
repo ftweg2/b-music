@@ -378,6 +378,7 @@ Job states:
 - `running_api_dash`
 - `running_browser_network`
 - `running_mse_sourcebuffer`
+- `running_douyin_music`
 - `processing_media`
 - `succeeded`
 - `failed`
@@ -389,3 +390,18 @@ Job states:
 GET /v1/strategies
 GET /v1/strategies/metrics
 ```
+
+`GET /v1/strategies` lists every strategy and each source's automatic order. `default_order` is the Bilibili order, kept for older clients:
+
+```json
+{
+  "strategies": ["api_dash", "browser_network", "mse_sourcebuffer", "douyin_music"],
+  "default_order": ["api_dash", "browser_network", "mse_sourcebuffer"],
+  "source_orders": {
+    "bilibili": ["api_dash", "browser_network", "mse_sourcebuffer"],
+    "douyin": ["douyin_music"]
+  }
+}
+```
+
+`GET /v1/strategies/metrics` returns, for each strategy, the attempt, success and failure counts, the last success and failure times, the last failure reason, and the average duration. The figures come from the kernel's stored job history.
