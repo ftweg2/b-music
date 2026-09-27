@@ -170,6 +170,24 @@ Force mode:
 }
 ```
 
+Douyin item (see [Strategy Policy](STRATEGY_POLICY.md#douyin-music)):
+
+```json
+{
+  "job_id": "j_003",
+  "external_owner_id": "user_or_team_123",
+  "profile_id": "p_xxx",
+  "url": "https://www.douyin.com/video/7687946506598968422",
+  "strategy_mode": "force",
+  "strategy": "douyin_music",
+  "outputs": ["raw"]
+}
+```
+
+`url` accepts Bilibili video URLs or BV ids, and Douyin links on `www.douyin.com`, `douyin.com`, `m.douyin.com`, `www.iesdouyin.com` (`/video/<id>`, `/note/<id>`, `/share/video/<id>`, `?modal_id=<id>`) or `v.douyin.com/<code>/` share links. Job creation does not touch the network; share links are resolved when the job runs. A strategy that does not belong to the URL's source is rejected with `400`.
+
+A successful Douyin job publishes the source audio as the `raw` artifact: `raw.mp3` (`audio/mpeg`) for background music, or `raw.m4a` (`audio/mp4`) when the audio had to be copied out of the video.
+
 ```http
 GET /v1/jobs/{job_id}?external_owner_id=user_or_team_123
 POST /v1/jobs/{job_id}/cancel
@@ -241,6 +259,53 @@ Security requirements:
 - Return metadata only.
 - Do not expose Cookie, storage state, browser profile files, sensitive headers, or full signed media URLs.
 - Do not use this endpoint for crawling, account pooling, or access-control bypass.
+
+## Douyin Resolve
+
+```http
+POST /v1/douyin/resolve
+```
+
+Purpose: read public metadata for one user-supplied Douyin link, so an App can show a title before it submits a `douyin_music` job. The kernel opens the public page in a fresh, cookie-less browser; no login or profile state is used. The `profile_id` is only checked for ownership.
+
+Request:
+
+```json
+{
+  "external_owner_id": "user_or_team_123",
+  "profile_id": "p_xxx",
+  "url": "https://v.douyin.com/iRNBho6x/"
+}
+```
+
+Response:
+
+```json
+{
+  "provider": "kernel_douyin",
+  "profile_id": "p_xxx",
+  "aweme_id": "7687946506598968422",
+  "source_url": "https://www.douyin.com/video/7687946506598968422",
+  "title": "item description #tag",
+  "creator_name": "creator",
+  "duration_seconds": 84,
+  "music_title": "song title",
+  "music_author": "artist",
+  "has_music_audio": true,
+  "has_video_audio": true,
+  "has_cover": true
+}
+```
+
+`has_cover` is true when the kernel cached the item's cover while resolving. Douyin only provides signed, expiring cover URLs, so the kernel downloads the cover once (only from `https://*.douyinpic.com`, JPEG/PNG/WebP/GIF, at most 2 MiB, checked by file signature) and keeps up to 2,000 covers under `KERNEL_DATA_DIR/douyin-covers`, dropping the oldest. Read it with:
+
+```http
+GET /v1/douyin/covers/{aweme_id}?external_owner_id=user_or_team_123
+```
+
+It returns the image (`404` when not cached). No Douyin image URL is ever returned.
+
+Errors: `400` for links that are not Douyin items or share links that do not resolve, `403`/`404` for profile ownership, `404` (`DOUYIN_ITEM_UNAVAILABLE`) for deleted, private or filtered items, `503` with `Retry-After` (`DOUYIN_BUSY`) when the kernel is at `MAX_ACTIVE_JOBS` (jobs and lookups share it) or too many lookups are waiting, `503` (`DOUYIN_BROWSER_CRASHED`) when the lookup browser crashed, `504` when the page does not answer within `DOUYIN_DETAIL_TIMEOUT_SECONDS`, and `502` when the page cannot be loaded. No media URLs, cover URLs or cookies are returned.
 
 ## Video Resolve
 

@@ -11,8 +11,10 @@ flowchart LR
     Selector --> ApiDash["api_dash"]
     Selector --> BrowserNetwork["browser_network"]
     Selector --> MSE["mse_sourcebuffer"]
+    Selector --> Douyin["douyin_music"]
     BrowserNetwork --> Profiles["Kernel-owned Playwright profiles"]
     MSE --> Profiles
+    Douyin --> Ephemeral["Fresh cookie-less browser per lookup"]
     Jobs --> Media["ffprobe/ffmpeg media pipeline"]
     Media --> Artifacts["Local artifact storage"]
 ```
@@ -22,8 +24,8 @@ flowchart LR
 - Own local profile mapping for `external_owner_id` to `profile_id`.
 - Own browser profiles and Bilibili login state.
 - Verify profile ownership before every job.
-- Lock a profile while a job is running.
-- Run extraction strategies sequentially.
+- Lock a profile while a Bilibili job is running. Douyin jobs never open the profile and do not take its lock.
+- Route each job to its source's strategies (Bilibili or Douyin) and run them sequentially.
 - Preserve raw audio artifacts.
 - Write artifact metadata and sha256 checksums.
 
@@ -33,7 +35,7 @@ flowchart LR
 - No frontend.
 - User-provided cookie/storage-state import into kernel profiles is allowed.
 - No cookie export or leakage.
-- No general-purpose downloader or scraping workflow.
+- No general-purpose downloader or scraping workflow. Douyin support handles one user-supplied link per request; it does not search, list or crawl Douyin.
 - No CAPTCHA, DRM/EME, region, membership, or anti-bot bypass.
 
 ## Storage

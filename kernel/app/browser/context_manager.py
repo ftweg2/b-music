@@ -113,7 +113,8 @@ async def _launch_context(profile_id: str, settings: Settings) -> tuple[object, 
         "user_data_dir": str(user_data_dir),
         "headless": settings.playwright_headless,
         "user_agent": settings.bilibili_user_agent,
-        "args": ["--disable-dev-shm-usage"],
+        # Extraction plays media in a headless page; nothing should reach the speakers.
+        "args": ["--disable-dev-shm-usage", "--mute-audio"],
     }
     if settings.playwright_executable_path:
         options["executable_path"] = settings.playwright_executable_path

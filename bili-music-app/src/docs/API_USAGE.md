@@ -187,7 +187,7 @@ curl -X POST "$BASE_URL/api/kernel/login/logout" -H "Content-Type: application/j
 
 | 字段 | 类型 | 规则 |
 | --- | --- | --- |
-| `keyword` | string | 必填，非空，最多 200 字符；关键词、BV 或视频页面链接 |
+| `keyword` | string | 必填，非空，最多 200 字符；关键词、BV、视频页面链接，或抖音分享文字/链接 |
 | `useRemote` | boolean | 默认 false；在线搜索需显式 true |
 | `provider` | string | 新在线搜索默认 auto；可选 auto/bilibili/kernel；mock 不用于正式客户端 |
 | `limit` | integer | 默认 20；请求 1–50，在线通常上限 20，以响应实际值为准 |
@@ -212,6 +212,20 @@ curl -X POST "$BASE_URL/api/search" -H "Content-Type: application/json" -d '{"ke
 ```
 
 auto 只在新搜索时选择来源：已登录优先 kernel，未登录或暂时读不到登录状态时选择 bilibili。选定来源的在线请求失败后不会自动改查本地。显式 kernel 要求有效登录。
+
+### 抖音链接
+
+keyword 中含有抖音链接（`v.douyin.com` 分享短链、`www.douyin.com/video/<id>`、带 `modal_id` 的精选页链接、`iesdouyin.com` 分享页）时，按 `source: "direct"` 处理，只返回这一个作品，不做关键词搜索：
+
+- `useRemote: true`：App 请内核读取作品的公开信息（`POST /v1/douyin/resolve`，约 5–10 秒，每个账号每分钟最多 12 次），生成一条候选。候选的 `bvid` 为 `DY` 加作品编号，例如 `DY7687946506598968422`；`creatorMid` 始终为 null，不会匹配已关注的 UP 主。
+- 封面：内核解析时缓存封面，候选的 `coverUrl` 是 App 相对地址 `/api/covers/DY…`（原生客户端请拼上服务地址）。抖音只提供会过期的签名图片地址，App 不保存它们。没有封面时 `coverUrl` 为 null。B 站候选的 `coverUrl` 仍是 hdslb.com 地址。
+- 已经保存过同一作品时直接返回保存的候选，不再请求内核（保存时没拿到封面的作品会重新读取一次）；分享短链需要内核解析，每次都会请求。
+- `useRemote: false`：只返回本地已有的候选，不联网。
+- 作品不存在、已删除或仅作者可见时返回 `SEARCH_PROVIDER_FAILED`，`provider` 为 `douyin`。
+
+分享文字可能超过 200 字符；客户端应先从中提取链接再提交。网页搜索框粘贴时会自动只保留链接。
+
+App 本身从不访问抖音，也不保存抖音的媒体地址，所有读取都经过内核。
 
 成功响应包含：
 
@@ -385,6 +399,8 @@ curl -X POST "$BASE_URL/api/playlists/7/items" -H "Content-Type: application/jso
 | strategyOrder | auto 时可指定 1–3 个支持的策略；不传使用内核默认顺序 |
 
 不要在 auto 模式同时指定 strategy，也不要在 force 模式指定 strategyOrder。新客户端不使用兼容的 snake_case 别名。
+
+抖音候选（`bvid` 以 `DY` 开头）忽略上述策略参数，始终使用内核的 `douyin_music` 策略，并保留原始音频：通常是作品背景音乐的 MP3（`media.mimeType` 为 `audio/mpeg`，下载文件名以 `.mp3` 结尾）；作品没有单独的背景音乐时，是从视频中原样复制出来的 AAC 音轨（`.m4a`）。收藏、歌单、播放区间对抖音候选同样可用，`bvid` 参数直接传 `DY…` 编号即可。
 
 以下是省略部分元数据的响应节选：
 

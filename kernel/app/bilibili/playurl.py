@@ -15,6 +15,12 @@ class AudioCandidate:
     codecs: str | None
     mime_type: str | None
     audio_id: int | None
+    # The same stream on other CDN nodes, tried in order when `url` fails.
+    backup_urls: tuple[str, ...] = ()
+
+    @property
+    def urls(self) -> list[str]:
+        return list(dict.fromkeys([self.url, *self.backup_urls]))
 
 
 async def fetch_playurl(
@@ -61,10 +67,12 @@ def select_best_audio(playurl_data: dict[str, object]) -> AudioCandidate:
     url = best.get("baseUrl") or best.get("base_url")
     if not url:
         raise BilibiliApiError("DASH_AUDIO_EMPTY", "selected audio missing URL")
+    backups = best.get("backupUrl") or best.get("backup_url") or []
     return AudioCandidate(
         url=str(url),
         bandwidth=int(best.get("bandwidth") or 0),
         codecs=best.get("codecs"),
         mime_type=best.get("mimeType") or best.get("mime_type"),
         audio_id=best.get("id"),
+        backup_urls=tuple(str(item) for item in backups if isinstance(item, str) and item) if isinstance(backups, list) else (),
     )

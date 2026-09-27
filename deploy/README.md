@@ -2,12 +2,15 @@
 
 Production uses prebuilt Linux images, an isolated Compose project named `bmusic`, `/opt/bmusic` data/configuration, loopback ports 13100 (App) and 18100 (kernel), and its own `bmusic.ftwegc.com` Nginx virtual host. No existing site's files are replaced. The VPS does not run a Next development server or build the application.
 
-The current deployment uses App `20260906-heart-r5` and kernel `20260906-dash-r3` on the shared Antigravity host
+The current deployment uses App `20260927-douyin-r6` and kernel `20260927-douyin-r7` on the shared Antigravity host
 `47.254.129.176`, serving `https://bmusic.ftwegc.com` through the existing Caddy.
-Both Linux images were built and validated locally before upload. B-Music has
-lower CPU priority, 160/320 MiB App/kernel RAM limits, a 512 MiB kernel swap allowance, and a guard that stops only
-B-Music when host resources or Antigravity health require it. Antigravity's
-container, resource limits and Compose configuration were preserved. See
+Both Linux images were built and validated locally before upload. Antigravity has
+priority, but B-Music is not boxed in. There is no fixed CPU cap; a low CPU weight
+makes B-Music yield under contention. The App has 256 MiB. The kernel's RAM
+ceiling moves between 320 and 768 MiB with host headroom, with 512 MiB of swap
+above it. A guard stops only B-Music when host resources or Antigravity health
+require it, and restarts it after five healthy minutes. Antigravity's container,
+resource limits and Compose configuration were preserved. See
 [the current deployment and recovery record](ANTIGRAVITY_DEPLOYMENT.md).
 
 API DASH now uses the kernel profile's existing HTTP session for metadata, WBI
@@ -58,7 +61,7 @@ Each snapshot actually gets a unique `seed-data-UUID` directory, recorded in the
 
 The 1 GB VPS uses the branded Google Chrome for Testing Headless Shell 152.0.7977.82 through `PLAYWRIGHT_EXECUTABLE_PATH`. AAC/MSE support was explicitly checked; Playwright's unbranded bundled headless shell was rejected because its AAC check was false. The full Chrome channel remains installed as a fallback. This changes the browser runtime footprint, not the App's API or music features. The upstream binary comes from Google's versioned Chrome for Testing distribution over verified HTTPS.
 
-On the current Antigravity host, the App cannot swap. The kernel retains its 320 MiB RAM limit and may use up to 512 MiB of the existing host swap (`memswap_limit: 832m` means RAM plus swap). The initial no-swap setting killed Chromium on a real video page and was corrected on 2026-09-06. The host swap configuration, Antigravity limits, low music CPU priority and protection guard are unchanged. QR preparation has a 60-second server budget on this VPS and a 90-second client request budget; expiry after QR generation remains unchanged.
+On the current Antigravity host, the App cannot swap. The kernel starts at 320 MiB of RAM and may use 512 MiB of the existing host swap above its RAM ceiling (`memswap_limit: 832m` means RAM plus swap). `bmusic-priority-guard` then moves that ceiling with host headroom, up to 768 MiB. The initial no-swap setting killed Chromium on a real video page and was corrected on 2026-09-06. The host swap configuration and Antigravity limits are unchanged. QR preparation has a 60-second server budget on this VPS and a 90-second client request budget; expiry after QR generation remains unchanged.
 
 The login reliability update uses Bilibili's first-party QR generate/poll flow through the same kernel profile cookie jar, avoiding the full passport page and screenshots. The PNG is fixed for the session, expiry begins at readiness, and transient failures have bounded recovery and typed errors. See [login reliability](../kernel/docs/LOGIN_RELIABILITY.md). For a small update against the previously verified runtime, build **locally** with `docker build -f deploy/Dockerfile.kernel-update -t bmusic-kernel:RELEASE kernel`; the normal full Dockerfile also includes the pinned QR dependencies. Transfer prebuilt images with `export-images.mjs` and `docker load`; do not build or install application dependencies on the VPS.
 

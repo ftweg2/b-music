@@ -23,6 +23,10 @@ class ParallelDownloadUnsupported(RuntimeError):
     pass
 
 
+class DownloadTooLarge(RuntimeError):
+    """The response is larger than the caller's max_bytes; nothing is kept."""
+
+
 class ApiDashStrategy:
     name = StrategyName.API_DASH
 
@@ -57,9 +61,9 @@ class ApiDashStrategy:
             # The signed CDN URL supplies media authorization. Stream it without
             # copying the Bilibili session into a separate cookie jar or browser.
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-                download_info = await download_audio(
+                media_url, download_info = await download_from_mirrors(
                     client,
-                    audio.url,
+                    audio.urls,
                     headers,
                     raw_path,
                     context.settings,
@@ -92,7 +96,8 @@ class ApiDashStrategy:
             "bandwidth": audio.bandwidth,
             "codecs": audio.codecs,
             "mime_type": audio.mime_type,
-            "media_host": urlparse(audio.url).netloc,
+            "media_host": urlparse(media_url).netloc,
+            "mirror_index": audio.urls.index(media_url),
         }
         return StrategyResult.succeeded(
             reason="Downloaded best DASH audio candidate",
@@ -109,6 +114,35 @@ class ApiDashStrategy:
         )
 
 
+MIRROR_PASSES = 2
+MIRROR_RETRY_DELAY_SECONDS = 1.0
+
+
+async def download_from_mirrors(
+    client: httpx.AsyncClient,
+    urls: list[str],
+    headers: dict[str, str],
+    output_path: Path,
+    settings: object,
+    cancel_requested: Callable[[], bool] | None = None,
+) -> tuple[str, dict[str, int | str]]:
+    """Download the same stream from its primary CDN node, then its backups.
+
+    A second pass after a short pause rides out brief CDN or network hiccups.
+    """
+    last_error: httpx.HTTPError | None = None
+    for attempt in range(MIRROR_PASSES):
+        if attempt:
+            await asyncio.sleep(MIRROR_RETRY_DELAY_SECONDS)
+        for url in urls:
+            _raise_if_cancelled(cancel_requested)
+            try:
+                return url, await download_audio(client, url, headers, output_path, settings, cancel_requested)
+            except httpx.HTTPError as exc:
+                last_error = exc
+    raise last_error or httpx.DecodingError("no audio URL to download")
+
+
 async def download_audio(
     client: httpx.AsyncClient,
     url: str,
@@ -116,12 +150,20 @@ async def download_audio(
     output_path: Path,
     settings: object,
     cancel_requested: Callable[[], bool] | None = None,
+    *,
+    concurrency: int | None = None,
+    min_parallel_bytes: int | None = None,
+    max_bytes: int | None = None,
 ) -> dict[str, int | str]:
-    concurrency = int(getattr(settings, "api_dash_download_concurrency", 1))
-    min_parallel_bytes = int(getattr(settings, "api_dash_parallel_min_bytes", 4 * 1024 * 1024))
-    if concurrency > 1:
+    if concurrency is None:
+        concurrency = int(getattr(settings, "api_dash_download_concurrency", 1))
+    if min_parallel_bytes is None:
+        min_parallel_bytes = int(getattr(settings, "api_dash_parallel_min_bytes", 4 * 1024 * 1024))
+    if concurrency > 1 or max_bytes is not None:
         content_length = await _probe_range_content_length(client, url, headers)
-        if content_length and content_length >= min_parallel_bytes:
+        if max_bytes is not None and content_length and content_length > max_bytes:
+            raise DownloadTooLarge(f"media is {content_length} bytes, above the {max_bytes} byte limit")
+        if concurrency > 1 and content_length and content_length >= min_parallel_bytes:
             ranges = _build_ranges(content_length, concurrency, min_parallel_bytes)
             if len(ranges) > 1:
                 try:
@@ -137,7 +179,7 @@ async def download_audio(
                 except (ParallelDownloadUnsupported, httpx.HTTPError):
                     _unlink_if_exists(output_path)
 
-    await _download_sequential(client, url, headers, output_path, cancel_requested)
+    await _download_sequential(client, url, headers, output_path, cancel_requested, max_bytes)
     return {"mode": "single_stream", "chunks": 1, "content_length": output_path.stat().st_size}
 
 
@@ -147,6 +189,7 @@ async def _download_sequential(
     headers: dict[str, str],
     output_path: Path,
     cancel_requested: Callable[[], bool] | None = None,
+    max_bytes: int | None = None,
 ) -> None:
     temp_path = output_path.with_name(f".{output_path.name}.download")
     _unlink_if_exists(temp_path)
@@ -172,11 +215,15 @@ async def _download_sequential(
                         "partial audio response did not contain the full representation"
                     )
                 expected = response_range[1] - response_range[0] + 1
+            if max_bytes is not None and expected is not None and expected > max_bytes:
+                raise DownloadTooLarge(f"media is {expected} bytes, above the {max_bytes} byte limit")
             with temp_path.open("wb") as handle:
                 async for chunk in response.aiter_raw(chunk_size=DOWNLOAD_CHUNK_SIZE):
                     _raise_if_cancelled(cancel_requested)
                     if chunk:
                         written += len(chunk)
+                        if max_bytes is not None and written > max_bytes:
+                            raise DownloadTooLarge(f"media exceeded the {max_bytes} byte limit")
                         handle.write(chunk)
             if expected is not None and written != expected:
                 raise httpx.DecodingError(

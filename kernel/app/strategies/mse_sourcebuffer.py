@@ -10,6 +10,7 @@ from app.async_work import run_blocking
 from app.bilibili.bvid import normalize_video_url, parse_bvid
 from app.browser.context_manager import BrowserContextManager
 from app.browser.mse_capture import MseCaptureLimitExceeded, MseSegmentSequenceInvalid, MseSegmentSink
+from app.browser.page_budget import skip_decorative_resources
 from app.models import StrategyName
 from app.security import sanitize_text
 from app.strategies.browser_network import _trigger_player_load
@@ -38,6 +39,7 @@ class MseSourceBufferStrategy:
             video_url = normalize_video_url(context.url)
             managed = await manager.open_context(context.profile_id, add_mse_hook=True)
             page = await managed.new_page()
+            await skip_decorative_resources(page)
             await page.expose_binding("__biliCtfAudioSegment", sink.receive)
             await page.add_init_script(script="window.__BILI_CTF_AUDIO_MSE_LIMITS__ = " + json.dumps({
                 "segmentBytes": context.settings.mse_max_segment_bytes,

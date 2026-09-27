@@ -9,6 +9,7 @@ import { effectivePlaybackRange, formatPlaybackTime, playbackResumeTime, type Pl
 import { PlaybackRangeEditor } from "./PlaybackRangeEditor";
 import { useRouter } from "next/navigation";
 import type { CandidateItem } from "@/lib/models";
+import { coverThumbnail } from "@/lib/coverImage";
 import type { TrackApiResource } from "@/lib/trackApi";
 import { buildPlaylistQueue, normalizePlayerState, waitForPreparedTrack, type QueueItem, type StoredPlayerState } from "@/lib/clientPlayback";
 import {
@@ -877,11 +878,12 @@ export function downloadCandidate(candidate: CandidateItem): void {
 }
 
 function getProxiedImageUrl(url?: string | null): string {
-  if (!url) return "";
-  if (url.startsWith("http://") || url.startsWith("https://")) {
-    return `/api/image-proxy?url=${encodeURIComponent(url)}`;
+  const thumbnail = coverThumbnail(url, "player");
+  if (!thumbnail) return "";
+  if (thumbnail.startsWith("http://") || thumbnail.startsWith("https://")) {
+    return `/api/image-proxy?url=${encodeURIComponent(thumbnail)}`;
   }
-  return url;
+  return thumbnail;
 }
 
 function toQueueItem(candidate: CandidateItem): QueueItem {

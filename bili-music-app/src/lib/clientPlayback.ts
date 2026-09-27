@@ -1,6 +1,7 @@
 import { PLAYBACK_MODES, type PlaybackMode } from "./playback";
 import type { TrackApiResource } from "./trackApi";
 import type { CandidateItem } from "./models";
+import { isAppCoverPath } from "./videoRef";
 
 export function buildPlaylistQueue(candidates: CandidateItem[]): QueueItem[] {
   const seen = new Set<string>();
@@ -43,7 +44,7 @@ export function normalizePlayerState(value: unknown): StoredPlayerState | null {
       candidateId: item.candidateId, bvid: item.bvid.slice(0, 32), title: item.title.slice(0, 500),
       creatorName: typeof item.creatorName === "string" ? item.creatorName.slice(0, 300) : null,
       creatorMid: typeof item.creatorMid === "string" && /^\d{1,24}$/.test(item.creatorMid) ? item.creatorMid : null,
-      coverUrl: typeof item.coverUrl === "string" && /^(https?:)?\/\//.test(item.coverUrl) ? item.coverUrl : null,
+      coverUrl: typeof item.coverUrl === "string" && (/^(https?:)?\/\//.test(item.coverUrl) || isAppCoverPath(item.coverUrl)) ? item.coverUrl : null,
     }));
   };
   const queue = normalizeItems(raw.queue, 200);

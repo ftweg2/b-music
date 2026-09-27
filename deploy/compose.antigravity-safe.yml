@@ -1,18 +1,25 @@
 # Overlay for the shared 47.254.129.176 host. Never changes Antigravity limits.
+#
+# Antigravity has priority; B-Music is not boxed in. CPU has no fixed cap: a
+# low weight (128 against Antigravity's default 1024) means B-Music only gets
+# the cores Antigravity leaves idle, and yields about 8:1 under contention.
+# Memory: the kernel starts at 320 MiB and bmusic-priority-guard moves its
+# ceiling with host headroom (320-768 MiB, always leaving 300 MiB free),
+# pushing the excess into swap when Antigravity needs RAM. B-Music is also the
+# OOM killer's first choice, and the guard stops it under real pressure.
 services:
   app:
     environment:
-      NODE_OPTIONS: --max-old-space-size=96
-    mem_limit: 160m
-    memswap_limit: 160m
-    cpus: 0.25
+      NODE_OPTIONS: --max-old-space-size=160
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 2.0
     cpu_shares: 128
     oom_score_adj: 800
   kernel:
     mem_limit: 320m
-    # Total RAM + swap: keep resident RAM capped, allow Chromium's cold pages
-    # up to 512 MiB of the host's existing swap instead of killing its renderer.
+    # RAM + swap. The guard raises and lowers both together, keeping 512 MiB of swap.
     memswap_limit: 832m
-    cpus: 0.50
+    cpus: 2.0
     cpu_shares: 128
     oom_score_adj: 900

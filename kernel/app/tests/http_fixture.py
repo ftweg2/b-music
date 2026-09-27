@@ -29,6 +29,12 @@ subprocess.run([
     "ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=12",
     "-c:a", "aac", "-movflags", "+faststart", "-y", str(sample),
 ], check=True, timeout=15)
+# A Douyin cover as a resolve would have cached it, for the App's /api/covers route.
+(root / "douyin-covers").mkdir(exist_ok=True)
+subprocess.run([
+    "ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=green:s=16x16", "-frames:v", "1",
+    "-y", str(root / "douyin-covers" / "7000000000000000001.jpg"),
+], check=True, timeout=15)
 
 from fastapi import HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response
@@ -95,14 +101,14 @@ async def launch_http(settings, cookies):
 browsers._launch_request_context = launch_http
 
 original_wait = browser_network._wait_with_cancellation
-async def gated_browser_wait(page, wait_ms, context):
+async def gated_browser_wait(page, wait_ms, context, ready=None):
     metrics["browser_stage"] = True
     deadline = time.monotonic() + 25
     try:
         while controls["hold_browser"] and time.monotonic() < deadline:
             context.raise_if_cancelled()
             await asyncio.sleep(0.05)
-        await original_wait(page, min(wait_ms, 1000), context)
+        await original_wait(page, min(wait_ms, 1000), context, ready=ready)
     finally:
         metrics["browser_stage"] = False
 browser_network._wait_with_cancellation = gated_browser_wait

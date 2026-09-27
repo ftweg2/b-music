@@ -1,21 +1,28 @@
-# Antigravity-priority deployment — 2026-09-06
+# Antigravity-priority deployment — 2026-09-06, updated 2026-09-27
 
 The live site is https://bmusic.ftwegc.com on `47.254.129.176`, with App
-`20260906-heart-r5` and kernel `20260906-dash-r3`. The App and kernel were built on the local Windows Docker
+`20260927-douyin-r6` and kernel `20260927-douyin-r7`. The App and kernel were built on the local Windows Docker
 Linux engine. The VPS only received and loaded prebuilt images; it performed no
 application build or dependency installation. Source and data archives were
 also verified after upload.
 
 ## Isolation and priority
 
+Antigravity has priority; B-Music is not boxed in (since 2026-09-27).
+
 | Service | RAM limit | Swap allowance | CPU limit | CPU shares | OOM adjustment |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| B-Music App | 160 MiB | 0 | 0.25 core | 128 | 800 |
-| B-Music kernel | 320 MiB | 512 MiB | 0.50 core | 128 | 900 |
+| B-Music App | 256 MiB | 0 | none (2 cores) | 128 | 800 |
+| B-Music kernel | 320–768 MiB, set by the guard | 512 MiB above RAM | none (2 cores) | 128 | 900 |
 
-The kernel's `memswap_limit: 832m` is the combined RAM and swap limit. The App
-cannot swap. The existing host swap configuration and Antigravity limits were
-not changed. Antigravity remained healthy with restart count zero;
+Antigravity keeps its own 900 MiB and 1.5-core limit with the default CPU weight
+of 1024. B-Music can use idle cores, and under contention it gets about one
+eighth of Antigravity's CPU share. The kernel starts at 320 MiB of RAM
+(`memswap_limit: 832m` is RAM plus swap). The guard then raises or lowers the
+ceiling with host headroom, always leaving 300 MiB of host memory available.
+Lowering the ceiling below the kernel's usage moves the excess into its swap
+allowance; it does not kill the kernel. The App cannot swap. The existing host
+swap configuration and Antigravity limits were not changed. Antigravity remained healthy with restart count zero;
 its image, container ID and startup time stayed unchanged. Its Compose file's
 SHA-256 also stayed unchanged. Caddy received only an appended B-Music site block
 through a validated graceful reload. Its existing configuration prefix, container
@@ -28,8 +35,24 @@ ports 13100 and 18100. The active configuration combines `compose.yml` and
 `bmusic-priority-guard.timer` checks about every 15 seconds. It stops only the two
 verified B-Music containers if available host memory falls below 200 MiB, free
 disk falls below 5 GiB, or Antigravity's local health check fails. A pause is
-recorded in `/opt/bmusic/private/priority-pause.json` and requires operator review;
-the guard does not repeatedly restart B-Music under pressure.
+recorded in `/opt/bmusic/private/priority-pause.json`.
+
+Since 2026-09-27 the guard also does two more things:
+
+- While B-Music runs, it sets the kernel's RAM ceiling to its memory use (excluding
+  page cache, which host available memory already counts) plus host
+  available memory, minus the 300 MiB reserve, within 320–768 MiB. It lowers the
+  ceiling on a 32 MiB change and raises it only on a 96 MiB change, so idle
+  fluctuation does not move it.
+- After its own stop, it restarts the kernel and then the App. Antigravity must
+  first have been healthy, with at least 450 MiB free and 6 GiB of disk, for five
+  minutes. After three automatic restarts within six hours, the pause is latched
+  for operator review.
+
+The guard never starts containers an operator stopped, or while
+`/opt/bmusic/private/priority-hold` exists. It keeps its state in
+`private/priority-state.json` and logs every stop, restart and ceiling change to
+`private/priority-events.jsonl`.
 
 ## Real-video OOM incident and correction
 
@@ -158,6 +181,76 @@ The consistent App database/environment backup is recorded in
 `/opt/bmusic/releases/20260906-heart-r5/source.tar.gz`, SHA-256
 `6040bedb42601aeba8f6e185a5dd2295a0334c57309e999c1ee9656d5935f1fb`.
 
+## Douyin support and dynamic resources — 2026-09-27
+
+At 07:20 UTC, App `20260927-douyin-r6` and kernel `20260927-douyin-r7` added Douyin
+links (one public item per pasted link, no login) and covers for both sources.
+The dynamic overlay and guard described above were installed at the same time.
+The API change is additive only, and the App reports revision 1.3.0. Kernel `r7`
+is `r6` plus one fix: closing a lookup browser after an unavailable answer no
+longer records a spurious crash.
+
+Local validation used the production limits:
+
+- The kernel image passed 339 tests.
+- App compatibility acceptance passed 11 checks, 1,503 requests and all 41
+  operations; ranges acceptance passed 3 checks.
+- A real Douyin link was searched, its cover shown, and it was prepared, streamed
+  and downloaded.
+
+Before replacement, a disposable container of the new kernel image ran on the VPS
+with the production limits and no production data. It read two of three public
+Douyin items from the German VPS in about 16 seconds each; covers and MP3 downloads
+also worked. The third item was unavailable (`core_dep`) from China as well,
+because it was deleted or private, not region-blocked.
+
+The kernel image was transferred as an 82,185-byte delta over `dash-r3`. The App
+has a newer Node base (24.21.0), so it was transferred as a 100.8 MB archive. The
+images are:
+
+- App `sha256:687c8430f619c589808f13c3d0596d87d891dc1d11c42f9805a3062c5b91449b`
+- Kernel `sha256:58658d094de9d298779b599f8a0c540d99fc93cf3fe6f1d331cf113f4bcfb9e9`
+
+Loading throttled itself and monitored Antigravity.
+
+The script `deploy/private/deploy_douyin_r7.py` did the following:
+
+- Its dry run confirmed that the only Compose changes were the two images, the
+  App's RAM and Node heap, and both CPU limits.
+- It stopped both music containers with no job active.
+- It backed up both databases, the kernel profiles, `.env`, both Compose files and
+  the old guard to `/opt/bmusic/private/before-douyin-r7-20260927T072008Z`.
+- It archived the 2026-09-13 pause record, from a resolved Antigravity upgrade, as
+  `priority-pause-20260913T034812Z.json`.
+- It installed the new files and started both services, which were back in about 15
+  seconds.
+
+Afterwards:
+
+- The kernel and App were healthy, with the new limits.
+- Antigravity's and Caddy's container IDs, start times, limits, restart counts,
+  Compose file and Caddyfile hashes were unchanged.
+- Public HTTPS and API revision 1.3.0 passed, and the existing Bilibili login
+  remained active.
+- A live kernel Douyin check resolved in 7.0 seconds with a JPEG cover. Its job
+  produced a 1,052,781-byte MP3 in 4.1 seconds.
+- Antigravity answered every health probe within 5 ms, host memory stayed at or
+  above 500 MiB, and neither music container recorded an OOM event.
+
+The first guard version had two problems. It switched the kernel ceiling between
+496 and 528 MiB as idle memory drifted. It also counted the kernel's page cache
+(181 of 256 MiB) both in the kernel's usage and in host available memory, which
+set the ceiling about 180 MiB too high. The guard was replaced in place with the
+32/96 MiB hysteresis and with the page cache excluded from the kernel's usage. No
+container was restarted. Its first installed copy is kept in the backup directory
+as `priority-guard.py.r7-initial`.
+
+The record is `/opt/bmusic/private/douyin-r7-deployment.json`. The sources are
+`/opt/bmusic/releases/20260927-douyin-r6/source.tar.gz` and
+`/opt/bmusic/releases/20260927-douyin-r7/source.tar.gz`. The previous images,
+`bmusic-app:20260906-heart-r5` and `bmusic-kernel:20260906-dash-r3`, remain on the
+VPS for rollback.
+
 ## Initial deployment verification and data
 
 - Local Linux kernel: 188 tests passed at 320 MiB/0.5 core.
@@ -195,14 +288,20 @@ docker compose -p bmusic -f compose.yml -f compose.antigravity-safe.yml ps
 systemctl status bmusic-priority-guard.timer --no-pager
 ```
 
-After a protection pause, inspect its reason, confirm Antigravity is healthy and
-restore sufficient memory/disk headroom before manually starting B-Music:
+After a protection pause the guard restarts B-Music by itself once the host has
+been healthy for five minutes. Check `private/priority-events.jsonl` for its
+reason. If the pause is latched (`"latched": true` in `private/priority-state.json`),
+confirm that Antigravity is healthy and that there is enough memory and disk,
+then start B-Music manually:
 
 ```sh
 docker compose -p bmusic -f compose.yml -f compose.antigravity-safe.yml up -d --pull never --wait
 ```
 
-Preserve the pause report as an incident record. To disable the music service,
+Starting B-Music manually ends the guard's pause. To clear a latch, remove the
+`latched` and `resumes` entries from `private/priority-state.json`. To keep
+B-Music stopped while investigating, create `private/priority-hold`. Preserve
+the pause report as an incident record. To disable the music service,
 use this project's `stop` command; do not stop or recreate Antigravity/Caddy.
 Keep both limit overlays in use during updates. Validate replacements locally,
 take a consistent data backup, and retain the existing image tag for rollback.

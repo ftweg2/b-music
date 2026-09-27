@@ -1,6 +1,8 @@
 import { accountLibraryEnabled } from "./ownerIdentity";
 export const API_VERSION = "1";
-export const API_REVISION = "1.2.0";
+// 1.3.0 (additive): Douyin links in search, DY-prefixed video references,
+// kernel-cached Douyin covers served at App-relative /api/covers/{bvid}.
+export const API_REVISION = "1.3.0";
 export const MAX_TRACK_STATUS_BATCH = 20;
 export const DEFAULT_TRACK_POLL_AFTER_MS = 1500;
 
@@ -35,7 +37,11 @@ export function apiCapabilities() {
       mediaHead: true,
       byteRangeRequests: true,
       sha256Checksum: true,
-      resumableDownloads: true
+      resumableDownloads: true,
+      // Search accepts Douyin share links; such candidates use bvid "DY<item id>".
+      douyinLinks: true,
+      // Douyin candidates' coverUrl is App-relative (/api/covers/DY…); resolve it against the base URL.
+      relativeCoverUrls: true
     },
     limits: {
       trackStatusBatch: MAX_TRACK_STATUS_BATCH,
@@ -52,6 +58,7 @@ export function apiCapabilities() {
       openapi: "/api/openapi.json",
       search: "/api/search",
       playbackRange: "/api/playback-ranges/{bvid}",
+      douyinCover: "/api/covers/{bvid}",
       favorites: "/api/favorites",
       playlists: "/api/playlists",
       playlist: "/api/playlists/{playlistId}",

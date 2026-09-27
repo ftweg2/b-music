@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { sourceUrlForVideoRef } from "./videoRef";
 
 import type {
   CandidateInteraction,
@@ -904,17 +905,13 @@ function hydrateCandidateFromFavorite(favorite: FavoriteVideo): CandidateVideo {
     coverUrl: favorite.coverUrlSnapshot,
     durationSeconds: favorite.durationSecondsSnapshot,
     pubTime: favorite.pubTimeSnapshot,
-    sourceUrl: favorite.sourceUrlSnapshot || canonicalBilibiliUrl(favorite.bvid),
+    sourceUrl: favorite.sourceUrlSnapshot || sourceUrlForVideoRef(favorite.bvid),
     category: favorite.categorySnapshot,
     tagsJson: favorite.tagsJsonSnapshot || "[]",
     searchKeyword: null,
     sourceProvider: "favorite_snapshot",
     lastSeenAt: nowIso()
   });
-}
-
-function canonicalBilibiliUrl(bvid: string): string {
-  return `https://www.bilibili.com/video/${bvid}`;
 }
 
 function favoriteSnapshotQuality(candidate: CandidateVideo): FavoriteVideo["snapshotQuality"] {

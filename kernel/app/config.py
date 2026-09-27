@@ -53,6 +53,10 @@ class Settings:
     shutdown_grace_seconds: float = 10.0
     playwright_executable_path: str | None = None
     login_preparation_timeout_seconds: float = 30.0
+    douyin_detail_timeout_seconds: float = 45.0
+    douyin_download_concurrency: int = 2
+    douyin_max_download_bytes: int = 512 * 1024 * 1024
+    douyin_max_browsers: int = 1
 
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -127,6 +131,14 @@ def get_settings() -> Settings:
         shutdown_grace_seconds=_bounded_float_from_env("SHUTDOWN_GRACE_SECONDS", 10.0, 1.0, 30.0),
         playwright_executable_path=_optional_env("PLAYWRIGHT_EXECUTABLE_PATH"),
         login_preparation_timeout_seconds=_bounded_float_from_env("LOGIN_PREPARATION_TIMEOUT_SECONDS", 30.0, 15.0, 120.0),
+        # A lookup takes 5-10 s on a desktop; a 0.5-core container needs far more headroom.
+        douyin_detail_timeout_seconds=_bounded_float_from_env("DOUYIN_DETAIL_TIMEOUT_SECONDS", 45.0, 5.0, 120.0),
+        douyin_download_concurrency=_bounded_int_from_env("DOUYIN_DOWNLOAD_CONCURRENCY", 2, 1, 8),
+        douyin_max_download_bytes=_bounded_int_from_env(
+            "DOUYIN_MAX_DOWNLOAD_BYTES", 512 * 1024 * 1024, 16 * 1024 * 1024, 4 * 1024 * 1024 * 1024
+        ),
+        # Each lookup browser peaks around 400-550 MB; one at a time suits small machines.
+        douyin_max_browsers=_bounded_int_from_env("DOUYIN_MAX_BROWSERS", 1, 1, 4),
     )
 
 

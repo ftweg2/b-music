@@ -18,7 +18,8 @@ B-Music 是一个本地优先的 Bilibili 音乐发现项目。Web App 负责搜
 - Followed-creator-first search without custom scores, literal multi-term local lookup, and explicit failures and fixed-source pagination.
 - Owner-scoped playlists with durable metadata snapshots, editable order, whole-playlist playback and queueing.
 - Metadata-only App storage: no App-side audio/video copies, cookies, browser profiles, or signed media URLs; downloads stream directly to the client device.
-- Dockerized FastAPI kernel with `api_dash`, `browser_network`, and `mse_sourcebuffer` strategies.
+- Dockerized FastAPI kernel with `api_dash`, `browser_network`, and `mse_sourcebuffer` strategies for Bilibili, plus `douyin_music` for public Douyin items.
+- Paste a Douyin share link into search to play, download, favorite or queue that item's background music. The kernel reads the public page without login or disguise and keeps the published audio file unchanged.
 - Kernel-owned Bilibili login state with QR login and user-supplied cookie/storage-state import.
 - Raw artifact preservation, SHA-256 checksums, strategy reports, and sanitized errors.
 - Bounded, user-triggered search and sequential extraction strategies.
@@ -117,7 +118,7 @@ See [SECURITY.md](SECURITY.md), [kernel security boundaries](kernel/docs/SECURIT
 
 ## Current workspace iteration
 
-Playlist creation/editing, followed-creator priority, and kernel lifecycle hardening are implemented in the current source. See [playlist functionality](bili-music-app/src/docs/PLAYLISTS.md) and [kernel stability changes](kernel/docs/STABILITY.md). These source changes do not imply a newly published release or an already redeployed container.
+Playlist creation/editing, followed-creator priority, kernel lifecycle hardening, and Douyin link support ([strategy policy](kernel/docs/STRATEGY_POLICY.md#douyin-music), [App API](bili-music-app/src/docs/API_USAGE.md)) are implemented in the current source. See [playlist functionality](bili-music-app/src/docs/PLAYLISTS.md) and [kernel stability changes](kernel/docs/STABILITY.md). These source changes do not imply a newly published release or an already redeployed container.
 
 ## Documentation
 

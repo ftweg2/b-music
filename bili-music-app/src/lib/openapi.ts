@@ -1,5 +1,6 @@
 import { API_REVISION } from "./apiCapabilities";
 import { API_ROUTES } from "./apiRoutes";
+import { VIDEO_REF_PATTERN } from "./videoRef";
 
 type Schema = Record<string, unknown>;
 const str = (extra: Schema = {}): Schema => ({ type: "string", ...extra });
@@ -10,12 +11,12 @@ const array = (items: Schema, maxItems?: number): Schema => ({ type: "array", it
 const object = (properties: Record<string, Schema>, required: string[] = []): Schema => ({ type: "object", properties, ...(required.length ? { required } : {}) });
 const ref = (name: string): Schema => ({ $ref: "#/components/schemas/" + name });
 const id = integer(1, Number.MAX_SAFE_INTEGER);
-const bv = str({ pattern: "^BV[0-9A-Za-z]{10}$" });
+const bv = str({ pattern: VIDEO_REF_PATTERN, description: "Source video reference: a Bilibili BV id, or DY followed by a Douyin item id." });
 const textOrNull = nullable(str());
 const stamp = str({ format: "date-time" });
 const strategy = str({ enum: ["api_dash", "browser_network", "mse_sourcebuffer"] });
 const prepareProperties = {
-  candidateId: id, bvid: bv, strategyMode: str({ enum: ["auto", "force"], description: "Omitting all strategy parameters selects force + api_dash. Explicit strategyOrder without a mode selects auto." }),
+  candidateId: id, bvid: bv, strategyMode: str({ enum: ["auto", "force"], description: "Omitting all strategy parameters selects force + api_dash. Explicit strategyOrder without a mode selects auto. Douyin candidates always use the kernel's douyin_music strategy; strategy parameters are ignored for them." }),
   strategy, strategyOrder: { ...array(strategy, 3), minItems: 1 },
   strategy_mode: str({ enum: ["auto", "force"], deprecated: true }),
   strategy_order: { ...array(strategy, 3), minItems: 1, deprecated: true },
@@ -130,6 +131,7 @@ const ops: Record<string, Operation> = {
   "POST /api/kernel/login/logout": {summary:"退出本机 B 站登录（保留音乐库）",request:"LogoutRequest",response:object({loggedIn:bool,message:str()},["loggedIn","message"]),description:"确认后调用。音频／搜索仍使用登录资料时返回 409；先退出成功，再调用 login/start 即换号。"},
   "GET /api/kernel/login/qr": {summary:"读取当前 owner 的二维码图片",binary:"image/png",query:[{name:"profileId",schema:str(),required:true},{name:"loginSessionId",schema:str(),required:true},{name:"externalOwnerId",schema:str()}]},
   "GET /api/image-proxy": {summary:"显示 Bilibili 封面",binary:"image/*",query:[{name:"url",schema:str(),required:true}]},
+  "GET /api/covers/{bvid}": {summary:"显示抖音封面",binary:"image/*",description:"只接受 DY 开头的抖音作品编号。封面由内核在解析链接时缓存；抖音候选的 coverUrl 就是这个 App 相对地址。"},
 };
 const commonHeaders = {
   "X-Request-Id": {schema:str(),description:"请求追踪 ID"},

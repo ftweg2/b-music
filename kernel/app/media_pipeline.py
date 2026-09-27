@@ -111,6 +111,59 @@ def ffmpeg_stream_copy(
         _unlink_if_exists(temp_path)
 
 
+def ffmpeg_extract_audio(
+    input_path: Path,
+    output_path: Path,
+    cancel_requested: Callable[[], bool] | None = None,
+) -> str | None:
+    """Copy the first audio stream out of a video container without re-encoding."""
+    if not shutil.which("ffmpeg"):
+        return "ffmpeg not available"
+    temp_path = _temporary_media_path(output_path)
+    _unlink_if_exists(temp_path)
+    try:
+        code, _stdout, stderr = _run_command(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-y",
+                "-i",
+                str(input_path),
+                "-map",
+                "0:a:0",
+                "-vn",
+                "-c:a",
+                "copy",
+                str(temp_path),
+            ],
+            cancel_requested=cancel_requested,
+        )
+        if code != 0:
+            return stderr or "ffmpeg audio extraction failed"
+        if not temp_path.is_file() or temp_path.stat().st_size == 0:
+            return "ffmpeg audio extraction produced an empty file"
+        temp_path.replace(output_path)
+        return None
+    finally:
+        _unlink_if_exists(temp_path)
+
+
+def audio_only_problem(probe: dict[str, object] | None) -> str | None:
+    """Return why an ffprobe result is not a single-purpose audio file, or None."""
+    streams = probe.get("streams") if isinstance(probe, dict) else None
+    if not isinstance(streams, list) or not streams:
+        return "no media streams found"
+    kinds = {stream.get("codec_type") for stream in streams if isinstance(stream, dict)}
+    if "audio" not in kinds:
+        return "no audio stream found"
+    if kinds - {"audio"}:
+        return f"unexpected non-audio streams: {', '.join(sorted(str(kind) for kind in kinds - {'audio'}))}"
+    return None
+
+
 def ffmpeg_export_wav(
     input_path: Path,
     output_path: Path,

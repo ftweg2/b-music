@@ -8,6 +8,9 @@ import { assertRateLimit, RateLimitError } from "../rateLimit";
 import { KernelRequestError } from "../kernelClient";
 import { searchSession, readSession, freezeLocalPool, frozenPage, commitPage, SearchSnapshotError, type FrozenSearchPage } from "./sessions";
 import { MAX_SEARCH_PAGES, pageLimit } from "./pagination";
+import { douyinIdFromLink, findDouyinLink } from "../douyinLink";
+import { douyinRef, sourceUrlForVideoRef } from "../videoRef";
+import { resolveDouyinCandidate } from "./douyin";
 
 export class SearchProviderError extends Error {
   constructor(message: string, public provider: string, public page: number, public retryAfterSeconds?: number, public searchId?: string) {
@@ -28,7 +31,10 @@ export type SearchResponsePayload = {
 const pendingPages = new Map<string, Promise<FrozenSearchPage>>();
 
 export async function runSearch(request: SearchRequest): Promise<SearchResponsePayload> {
-  const keyword = sanitizeText(request.keyword, 200).trim();
+  // Find a Douyin link before sanitizing: sanitizing redacts query strings such as ?modal_id=<id>.
+  const douyinLink = findDouyinLink(request.keyword);
+  const douyinId = douyinLink ? douyinIdFromLink(douyinLink) : null;
+  const keyword = sanitizeText(douyinId ? sourceUrlForVideoRef(douyinRef(douyinId)) : douyinLink ?? request.keyword, 200).trim();
   if (!keyword) throw new Error("请先输入关键词");
   const provider = request.searchProvider ?? getSearchProvider(request.provider);
   const maximum = request.useRemote ? Math.min(provider.maxPageSize ?? 20, boundedInteger(Number(process.env.BILIBILI_SEARCH_LIMIT), 20, 1, 50)) : 50;
@@ -36,12 +42,28 @@ export async function runSearch(request: SearchRequest): Promise<SearchResponseP
   const page = boundedInteger(request.page, 1, 1, MAX_SEARCH_PAGES);
   const ownerId = request.appOwnerId || "local";
   let session = searchSession({ ownerId, keyword, provider: provider.name, useRemote: request.useRemote, limit, sessionKey: request.sessionKey }, request.searchId);
-  const directBvid = sanitizeBvid(keyword);
-  const source = directBvid ? "direct" : request.useRemote ? "remote" : "local";
+  const directBvid = douyinLink ? "" : sanitizeBvid(keyword);
+  const source = douyinLink || directBvid ? "direct" : request.useRemote ? "remote" : "local";
   let stored = frozenPage(session, page);
   const cached = Boolean(stored);
 
-  if (!stored && source === "direct") {
+  if (!stored && douyinLink) {
+    const existing = douyinId ? getCandidateByBvid(douyinRef(douyinId)) : null;
+    let candidates: CandidateVideo[] = [];
+    // A saved item is reused as-is, unless it still lacks a cover and online lookup is allowed.
+    if (page === 1 && existing && (existing.coverUrl || !request.useRemote)) {
+      candidates = [existing];
+    } else if (page === 1 && request.useRemote) {
+      try {
+        candidates = [saveCandidateMetadata(await resolveDouyinCandidate(douyinLink, ownerId, keyword))];
+      } catch (error) {
+        const message = sanitizeText(error instanceof Error ? error.message : error);
+        logSearchQuery(keyword, 0, false, { provider: "douyin", page, error: message });
+        throw new SearchProviderError(message, "douyin", page, error instanceof RateLimitError ? error.retryAfterSeconds : undefined, session.id);
+      }
+    }
+    stored = commitPage(session, page, { candidates, hasNextPage: false, duplicatesRemoved: 0 }, 1);
+  } else if (!stored && source === "direct") {
     const existing = getCandidateByBvid(directBvid);
     const candidates = page !== 1 ? [] : existing ? [existing] : request.useRemote ? [saveCandidateMetadata(normalizeRawSearchResult({
       bvid: directBvid, title: `Bilibili 视频 ${directBvid}`,

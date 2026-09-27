@@ -14,6 +14,7 @@ class JobState:
     RUNNING_API_DASH = "running_api_dash"
     RUNNING_BROWSER_NETWORK = "running_browser_network"
     RUNNING_MSE_SOURCEBUFFER = "running_mse_sourcebuffer"
+    RUNNING_DOUYIN_MUSIC = "running_douyin_music"
     PROCESSING_MEDIA = "processing_media"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
@@ -26,8 +27,16 @@ class StrategyName:
     API_DASH = "api_dash"
     BROWSER_NETWORK = "browser_network"
     MSE_SOURCEBUFFER = "mse_sourcebuffer"
+    DOUYIN_MUSIC = "douyin_music"
 
-    ALL = [API_DASH, BROWSER_NETWORK, MSE_SOURCEBUFFER]
+    ALL = [API_DASH, BROWSER_NETWORK, MSE_SOURCEBUFFER, DOUYIN_MUSIC]
+
+
+class SourceName:
+    BILIBILI = "bilibili"
+    DOUYIN = "douyin"
+
+    ALL = [BILIBILI, DOUYIN]
 
 
 class StrategyMode:

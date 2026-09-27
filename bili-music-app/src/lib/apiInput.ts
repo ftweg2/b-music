@@ -1,5 +1,6 @@
 import { ApiError, optionalString, positiveId } from "./api";
 import type { CreatePreferredCreatorInput } from "./models";
+import { isVideoRef } from "./videoRef";
 
 export function booleanInput(value: unknown, fallback: boolean, name: string): boolean {
   if (value === undefined || value === null) return fallback;
@@ -16,7 +17,7 @@ export function integerInput(value: unknown, fallback: number, min: number, max:
 export function candidateReference(body: Record<string, unknown>): { candidateId?: number; bvid?: string } {
   const candidateId = body.candidateId === undefined || body.candidateId === null ? undefined : positiveId(body.candidateId, "candidateId");
   const value = body.bvid;
-  if (value !== undefined && value !== null && (typeof value !== "string" || !/^BV[0-9A-Za-z]{10}$/.test(value))) throw new ApiError(400, "INVALID_BVID", "bvid 必须是有效的 BV 号");
+  if (value !== undefined && value !== null && !isVideoRef(value)) throw new ApiError(400, "INVALID_BVID", "bvid 必须是有效的 BV 号或抖音作品编号（DY 开头）");
   const bvid = typeof value === "string" ? value : undefined;
   if (!candidateId && !bvid) throw new ApiError(400, "CANDIDATE_REQUIRED", "请提供 candidateId 或 bvid");
   return { candidateId, bvid };

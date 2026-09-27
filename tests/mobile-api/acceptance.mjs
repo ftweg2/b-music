@@ -71,7 +71,7 @@ async function request(method, url, body, options = {}) {
     const expected = options.status ?? 200;
     assert.ok((Array.isArray(expected)?expected:[expected]).includes(response.status),`${method} ${url}: ${response.status} ${JSON.stringify(data)}`);
     assert.equal(response.headers.get("x-request-id"),id,"request tracing");
-    assert.equal(response.headers.get("x-api-revision"),"1.2.0");
+    assert.equal(response.headers.get("x-api-revision"),"1.3.0");
     const op = operation(method,url);
     if (op) {
       const contract = op.value.responses[response.status];
@@ -337,6 +337,9 @@ try {
       await get("/api/image-proxy?url="+encodeURIComponent("https://i0.hdslb.com/bfs/unsafe.svg"),{status:415});
       await get("/api/image-proxy?url="+encodeURIComponent("https://i0.hdslb.com/bfs/redirect.png"),{status:[400,502]});
       await get("/api/image-proxy?url="+encodeURIComponent("http://127.0.0.1/private"),{status:400});
+      await request("GET","/api/covers/DY7000000000000000001");
+      await get("/api/covers/DY7000000000000000009",{status:404});
+      await get("/api/covers/BV1test00001",{status:404});
     }
   });
   await check("all registered mobile operations have successful HTTP/schema evidence",async () => {

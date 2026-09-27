@@ -12,6 +12,13 @@ from pathlib import Path
 from .models import utc_now_iso
 
 
+# System MIME tables differ between hosts and container images. Register the
+# audio containers the kernel produces so artifact types do not depend on them.
+mimetypes.add_type("audio/mpeg", ".mp3")
+mimetypes.add_type("audio/mp4", ".m4a")
+mimetypes.add_type("audio/aac", ".aac")
+
+
 @dataclass(frozen=True)
 class ArtifactRecord:
     name: str

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
+from collections.abc import Callable
 from pathlib import Path
 from pathlib import PurePosixPath
 from urllib.parse import urlencode, urlparse
@@ -15,6 +16,7 @@ from app.bilibili.wbi import MIXIN_KEY_ENC_TAB
 from app.browser.context_manager import BrowserContextManager
 from app.browser.responses import managed_response
 from app.browser.network_capture import MediaCandidate, NetworkCapture
+from app.browser.page_budget import skip_decorative_resources
 from app.media_pipeline import ffprobe_json
 from app.models import StrategyName
 from app.security import sanitize_text
@@ -46,6 +48,7 @@ class BrowserNetworkStrategy:
             video_url = normalize_video_url(context.url)
             managed = await manager.open_context(context.profile_id)
             page = await managed.new_page()
+            await skip_decorative_resources(page)
             capture = NetworkCapture()
             capture.attach(page)
 
@@ -59,6 +62,7 @@ class BrowserNetworkStrategy:
                 page,
                 context.settings.network_capture_ms,
                 context,
+                ready=lambda: _has_playurl_audio_list(capture.best_candidate()),
             )
             await capture.finish()
             context.raise_if_cancelled()
@@ -214,13 +218,23 @@ async def _wait_with_cancellation(
     page: object,
     wait_ms: int,
     context: StrategyContext,
+    ready: Callable[[], bool] | None = None,
 ) -> None:
     remaining = max(0, wait_ms)
     while remaining > 0:
         context.raise_if_cancelled()
+        if ready is not None and ready():
+            return
         interval = min(500, remaining)
         await page.wait_for_timeout(interval)
         remaining -= interval
+
+
+def _has_playurl_audio_list(candidate: object | None) -> bool:
+    # The player's playurl response lists every audio quality at once, and it
+    # outranks any single captured segment, so waiting longer cannot improve
+    # the choice. Stop capturing as soon as it has been parsed.
+    return candidate is not None and "playurl_dash_audio" in getattr(candidate, "reasons", ())
 
 
 async def _download_candidate(

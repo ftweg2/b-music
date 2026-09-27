@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import type { Playlist } from "@/lib/models";
+import { coverThumbnail } from "@/lib/coverImage";
 import { PLAYLIST_CHANGE_EVENT, playlistRequest, playlistsChanged } from "@/lib/playlistClient";
 import { ListMusicIcon, MusicIcon, CloseIcon } from "./Icons";
 
@@ -45,7 +46,7 @@ export function PlaylistLibrary({ initialPlaylists }: { initialPlaylists: Playli
     {error && <p className="errorText" role="alert">{error}</p>}
     <div className="sectionHeading"><h2>你的声音收藏夹</h2><span className="resultCount">{playlists.length} 个歌单</span></div>
     {playlists.length ? <div className="playlistGrid">{playlists.map((playlist, index) => <Link key={playlist.id} href={`/playlists/${playlist.id}`} className="playlistTile">
-      <div className={`playlistArtwork playlistTone${index % 4}`}>{playlist.coverUrl ? <img src={playlist.coverUrl} alt="" loading="lazy" referrerPolicy="no-referrer" onError={(event) => { event.currentTarget.style.display = "none"; }} /> : null}<MusicIcon size={45} /><span className="playlistArtworkLabel">MY PLAYLIST</span><span className="playlistOpenArrow">↗</span></div>
+      <div className={`playlistArtwork playlistTone${index % 4}`}>{playlist.coverUrl ? <img src={coverThumbnail(playlist.coverUrl, "playlist") ?? undefined} alt="" loading="lazy" referrerPolicy="no-referrer" onError={(event) => { event.currentTarget.style.display = "none"; }} /> : null}<MusicIcon size={45} /><span className="playlistArtworkLabel">MY PLAYLIST</span><span className="playlistOpenArrow">↗</span></div>
       <h3>{playlist.name}</h3><p>{playlist.description || "每一首，都是喜欢的理由。"}</p><span>{playlist.trackCount} 首音乐</span>
     </Link>)}</div> : <div className="empty"><div className="emptyIcon"><ListMusicIcon size={28} /></div><strong>给喜欢的音乐一个家</strong><span>创建歌单后，可从搜索、收藏或曲目详情中添加音乐。</span><button type="button" className="secondary" onClick={() => setShowCreate(true)}>创建第一个歌单</button></div>}
   </>;
